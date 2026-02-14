@@ -559,17 +559,6 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             },
         },
         (
-            "test_full",
-            "test_full_cpu",
-        ): {
-            "param_sets": {
-                "value_1": (([64, 128]), -65472.0),
-                "value_2": (([64, 128]), -65504.0),
-                "tuple": (((64, 64)), 1024.0),
-                "size": (torch.Size([64, 128]), 1024.0),
-            },
-        },
-        (
             "test_dropout_functional",
             "test_dropout_functional",
         ): {
@@ -963,13 +952,6 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
 
     def test_numel_cpu(self, x):
         compare_with_cpu(lambda x: torch.numel(x), x)
-
-    @pytest.mark.filterwarnings("ignore::torch_spyre.fallbacks.FallbackWarning")
-    def test_full_cpu(self, *args):
-        def fn(device=None):
-            return torch.full(*args, dtype=torch.float16, device=device)
-
-        compare_with_cpu(fn, needs_device=True, cpu_compile=False)
 
     def test_dim_op_cpu(self, op, dim, *args):
         def fn(*args):

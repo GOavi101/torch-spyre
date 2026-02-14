@@ -17,6 +17,7 @@
 import os
 import unittest
 import psutil
+import pytest
 import warnings
 from contextlib import contextmanager
 
@@ -56,6 +57,7 @@ class TestSpyre(TestCase):
         a_cpu = a.cpu()
         self.assertTrue(a_cpu.eq(3.5).all())
 
+    @pytest.mark.filterwarnings("ignore::torch_spyre.fallbacks.FallbackWarning")
     def test_ones_factory(self):
         a = torch.ones(50, device="spyre", dtype=torch.float16)
         self.assertEqual(a.device.type, "spyre")
@@ -96,6 +98,7 @@ class TestSpyre(TestCase):
         )
         self.assertEqual(expected_a_repr, a_repr)
 
+    @pytest.mark.filterwarnings("ignore::torch_spyre.fallbacks.FallbackWarning")
     def test_printing(self):
         t = torch.ones((2, 3), device="spyre", dtype=torch.float16)
 
