@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from torch_spyre._inductor import Unsupported
 from torch_spyre._inductor.codegen.compute_ops import num_bytes
 
 
@@ -1155,6 +1156,146 @@ def generate_clone(pointers, *, op, dimensions, inputs, outputs, **kwargs):
                                     "inpPieceOrder": [
                                         f"p{i}" for i in range(piece_count)
                                     ],
+                                    "outPieceOrder": [
+                                        f"p{i}" for i in range(piece_count)
+                                    ],
+                                }
+                            },
+                            "numClToUse": 1,
+                            "cl0ToLxOffsetLU": 0,
+                            "cl0ToLxOffsetSU": 0,
+                        },
+                    }
+                }
+            ],
+        }
+    }
+
+
+def generate_fill(pointers, *, op, dimensions, outputs, **kwargs):
+    if not outputs or len(outputs) != 1:
+        raise Unsupported("fill expects exactly one output")
+    op_info = kwargs.get("op_info") or {}
+    if "fill_value" not in op_info or "fill_dtype" not in op_info:
+        raise Unsupported("fill op_info must contain fill_value and fill_dtype")
+
+    ndims = len(dimensions)
+    # Get data type and buffer name from output (fill has no tensor inputs)
+    output_dtype = outputs[0]["device_layout"].device_dtype
+    word_length = num_bytes(output_dtype)
+    data_format = output_dtype.name
+    elems_per_stick = output_dtype.elems_per_stick()
+
+    if ndims == 1:
+        layout = ["out"]
+        dim_map = {"out": dimensions[0]}
+        offsets = {"out": 1}
+        loop_counts = {"out": dimensions[0] // elems_per_stick}
+        piece_valid_gaps = {"out": [[elems_per_stick, 0]]}
+        piece_sizes = {"out": elems_per_stick}
+        valid_gaps = {"out": [[dimensions[0], 0]]}
+        piece_count = dimensions[0] // elems_per_stick
+    elif ndims == 2:
+        layout = ["mb", "out"]
+        dim_map = {"mb": dimensions[0], "out": dimensions[-1]}
+        offsets = {
+            "mb": elems_per_stick if dimensions[0] % elems_per_stick == 0 else 1,
+            "out": dimensions[0],
+        }
+        loop_counts = {
+            "mb": dimensions[0] // elems_per_stick
+            if dimensions[0] % elems_per_stick == 0
+            else dimensions[0],
+            "out": dimensions[-1] // elems_per_stick,
+        }
+        piece_sizes = {
+            "mb": elems_per_stick if dimensions[0] % elems_per_stick == 0 else 1,
+            "out": elems_per_stick,
+        }
+        piece_valid_gaps = {
+            "mb": [[piece_sizes["mb"], 0]],
+            "out": [[piece_sizes["out"], 0]],
+        }
+        valid_gaps = {"mb": [[dimensions[0], 0]], "out": [[dimensions[-1], 0]]}
+        piece_count = (
+            dimensions[0]
+            * dimensions[-1]
+            // (
+                elems_per_stick * elems_per_stick
+                if dimensions[0] % elems_per_stick == 0
+                else elems_per_stick
+            )
+        )
+    else:
+        raise Unsupported(f"fill with {ndims}D not yet implemented")
+
+    output_name = outputs[0]["name"]
+    fill_value = op_info["fill_value"]
+    fill_dtype = str(op_info["fill_dtype"])
+
+    return {
+        "fill": {
+            "numCoresUsed_": 1,
+            "dscs_": [],
+            "coreIdToDscSchedule": {"0": [[0, -1, 0, 0]]},
+            "datadscs_": [
+                {
+                    "fill": {
+                        "coreIdsUsed_": [0],
+                        "dimPool_": layout,
+                        "primaryDs_": [{"name_": "pds0", "dimNames": layout}],
+                        "labeledDs_": [
+                            {
+                                "pdsName_": "pds0",
+                                "wordLength": word_length,
+                                "dataformat": data_format,
+                                "layoutDimOrder_": layout,
+                                "stickDimOrder_": ["out"],
+                                "dimToLayoutSize_": dim_map,
+                                "dimToStickSize_": {"out": elems_per_stick},
+                                "validGap_": valid_gaps,
+                                "PieceInfo": [
+                                    {
+                                        "key_": f"p{i}",
+                                        "dimToSize_": piece_sizes,
+                                        "validGap_": piece_valid_gaps,
+                                        "PlacementInfo": [
+                                            {
+                                                "type": "hbm",
+                                                "memId": [-1],
+                                                "startAddr": [
+                                                    pointers[output_name] // 128
+                                                ],
+                                            },
+                                            {
+                                                "type": "lx",
+                                                "memId": [0],
+                                                "startAddr": [16384],
+                                            },
+                                        ],
+                                    }
+                                    for i in range(piece_count)
+                                ],
+                                "hbmStartAddress_": pointers[output_name] // 128,
+                            },
+                        ],
+                        "fill_value_": fill_value,
+                        "fill_dtype_": fill_dtype,
+                        "op": {
+                            "name": "FILL",
+                            "gtrIdsUsed": [],
+                            "coreIDtoANInfo": {
+                                "0": {
+                                    "loopCount": loop_counts,
+                                    "loopCountL3SU": {},
+                                    "addr_info_": {
+                                        "l3lu": {
+                                            "type_": "stride",
+                                            "offset_": offsets,
+                                        },
+                                        "l3su": {"type_": "stride", "offset_": offsets},
+                                    },
+                                    "inpPieceOrder": [],
                                     "outPieceOrder": [
                                         f"p{i}" for i in range(piece_count)
                                     ],

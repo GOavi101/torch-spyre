@@ -218,3 +218,8 @@ def spyre__sin(input, **kwargs):
 @register_fallback([aten.cos.default, aten.cos.out])
 def spyre__cos(input, **kwargs):
     return torch.cos(input, **kwargs)
+
+
+@register_fallback([aten.ones.default, aten.ones.out])
+def spyre__ones(*args, **kwargs):
+    return torch.ones(*args, **kwargs)

@@ -32,6 +32,7 @@ from torch._inductor.virtualized import StoreMode, V
 
 from .runtime import ConstantArg, KernelSpec, TensorArg
 from .constants import (
+    FILL_OP,
     MATMUL_REDUCTION_OP,
     SPYRE_FP32_OPS,
     BATCH_MATMUL_OP,
@@ -470,6 +471,21 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
                 ]
 
             self.kernel_specs.append(ks)
+        elif isinstance(value, Constant):
+            # Fill output buffer with constant (e.g. from spyre.full / ones)
+            di = self.derive_dim_info(dst)
+            fill_op_info = {**op_info, "fill_value": value.value, "fill_dtype": value.dtype}
+            fill_args: list[TensorArg | ConstantArg] = [
+                ConstantArg(value.value, value.dtype),
+                create_tensor_arg(False, actuals.index(dst.name), dst.layout),
+            ]
+            scales = [
+                [-1] * len(di),
+                self.analyze_tensor_access(di, dst),
+            ]
+            self.kernel_specs.append(
+                create_kernel_spec(FILL_OP, False, di, fill_args, scales, fill_op_info)
+            )
         else:
             raise Unsupported(f"store value of unexpected type {type(value)}")
 

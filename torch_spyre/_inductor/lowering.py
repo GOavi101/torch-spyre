@@ -15,18 +15,32 @@
 
 from contextlib import contextmanager
 
+import sympy
 import torch
 
 from torch._inductor.ir import Reduction, Pointwise
 import torch._inductor.lowering as lowering
 
-from typing import Any, Callable, Union
+from typing import Any, Callable, List, Union
 
 from .constants import MATMUL_REDUCTION_OP, BATCH_MATMUL_OP
 from torch_spyre._C import get_elem_in_stick
 from torch_spyre.fallbacks import fallback_ops
 from .ir import SpyreReduction
 from torch._inductor.virtualized import V
+
+
+def _size_to_sympy_ranges(size: Union[List[int], tuple]) -> List[sympy.Expr]:
+    """Convert size (list of int or SymInt) to sympy expressions for Pointwise ranges."""
+    out = []
+    for s in size:
+        if isinstance(s, int):
+            out.append(sympy.Integer(s))
+        elif hasattr(s, "node") and s.node is not None:
+            out.append(s.node)
+        else:
+            out.append(sympy.Integer(int(s)))
+    return out
 
 # The specific spyre lowerings will be registered into this dictionary
 # and merged with the in-tree lowerings when needed
@@ -385,6 +399,25 @@ def lower_clamp(x, min=None, max=None):
         ranges=x.get_size(),
         origin_node=x.get_origin_node(),
         traceback=x.get_traceback(),
+    )
+    pw.realize()
+    return pw
+
+
+@register_spyre_lowering(torch.ops.spyre.full)
+def lower_full(size, fill_value, device, dtype=None):
+    """Lower spyre::full to a Pointwise that creates an output buffer and fills with constant."""
+    if dtype is None:
+        dtype = torch.get_default_dtype()
+    ranges = _size_to_sympy_ranges(size)
+    # inner_fn returns the constant so each index stores fill_value -> realized as fill op
+    pw = Pointwise.create(
+        device=device,
+        dtype=dtype,
+        inner_fn=lambda index: fill_value,
+        ranges=ranges,
+        origin_node=None,
+        traceback=None,
     )
     pw.realize()
     return pw

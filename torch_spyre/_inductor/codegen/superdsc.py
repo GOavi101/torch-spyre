@@ -17,6 +17,7 @@ from torch_spyre._inductor.constants import (
     BATCH_MATMUL_OP,
     TRANSPOSE_OP,
     CLONE_OP,
+    FILL_OP,
 )
 from torch_spyre._inductor import Unsupported
 from .compute_ops import generate_sfp_op, generate_matmul, generate_bmm
@@ -26,6 +27,7 @@ from .data_ops import (
     generate_transpose_3d_stick,
     generate_transpose_4d_stick,
     generate_clone,
+    generate_fill,
 )
 
 
@@ -138,6 +140,14 @@ def generate_sdsc(pointers, *, op, dimensions, inputs, outputs, reduction, **kwa
             op=op,
             dimensions=dimensions,
             inputs=inputs,
+            outputs=outputs,
+            **kwargs,
+        )
+    if op == FILL_OP:
+        return generate_fill(
+            pointers,
+            op=op,
+            dimensions=dimensions,
             outputs=outputs,
             **kwargs,
         )

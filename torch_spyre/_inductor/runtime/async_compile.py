@@ -21,7 +21,7 @@ import subprocess
 from torch._inductor.runtime.runtime_utils import cache_dir
 from torch_spyre._C import convert_artifacts
 from torch_spyre._inductor.codegen.superdsc import generate_sdsc
-from torch_spyre._inductor.constants import SEGMENT_OFFSETS
+from torch_spyre._inductor.constants import FILL_OP, SEGMENT_OFFSETS
 from . import KernelSpec, ConstantArg, UnimplementedOp
 from .kernel_runner import (
     SpyreSDSCKernelRunner,
@@ -59,7 +59,10 @@ class SpyreAsyncCompile:
                     lx_addr = addr
 
             if isinstance(ts, ConstantArg):
-                raise RuntimeError("TOOO: implement SDSC generation for constants")
+                # Fill op carries constant in op_info; skip adding to inputs/outputs
+                if ks.op != FILL_OP:
+                    raise RuntimeError("TOOO: implement SDSC generation for constants")
+                continue
             elif ts.is_input:
                 inputs.append(
                     {

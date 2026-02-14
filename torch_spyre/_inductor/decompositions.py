@@ -61,6 +61,22 @@ def full_decomp(
     return torch.ops.spyre.full(size, fill_value, device, dtype=dtype)
 
 
+@register_decomposition([torch.ops.aten.ones])
+def ones_decomp(
+    size: list[Union[int, torch.SymInt]],
+    dtype: Optional[torch.dtype] = None,
+    layout: Optional[torch.layout] = None,
+    device: Optional[torch.device] = None,
+    pin_memory: Optional[bool] = None,
+) -> torch.Tensor:
+    """Decompose aten.ones to spyre.full(size, 1.0, ...) for Inductor."""
+    assert layout == torch.strided or layout is None, f"dosn't support layout={layout}"
+    assert not pin_memory or pin_memory is None, (
+        f"dosn't support pin_memory={pin_memory}"
+    )
+    return torch.ops.spyre.full(size, 1.0, device, dtype=dtype)
+
+
 """
 Hook torch.nn.functional.layer_norm to select spyre optimized version where applicable
 """

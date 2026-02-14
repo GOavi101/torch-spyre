@@ -82,6 +82,12 @@ def device_layout_like(
 def pointwise_layout(n: SchedulerNode, args: list[SchedNodeArg]) -> FixedTiledLayout:
     pw: Pointwise = n.node.data
     output: FixedLayout = n.node.get_layout()
+    # Factory ops (e.g. spyre.full / ones) have no tensor inputs; use generic dense layout
+    if len(args) == 0:
+        stl = SpyreTensorLayout(output.size, output.dtype)
+        return FixedTiledLayout(
+            output.device, output.dtype, output.size, output.stride, stl
+        )
     origin_node = next(iter(pw.origins))
     op = origin_node.target
     if len(args) == 1:

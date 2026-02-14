@@ -14,6 +14,7 @@
 
 BATCH_MATMUL_OP = "batchmatmul"
 CLONE_OP = "clone"
+FILL_OP = "fill"
 MATMUL_REDUCTION_OP = "matmul"
 TRANSPOSE_OP = "transpose"
 
@@ -46,6 +47,7 @@ SPYRE_FP32_OPS = [
     "exx2",
     "layernormnorm",
     "clone",
+    "fill",
 ]
 
 LAYOUT_INPUT_LABELS = ["INPUT", "KERNEL", "KERNEL_IDX"]
