@@ -779,6 +779,18 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             },
         },
         (
+            "test_contiguous",
+            "test_contiguous",
+        ): {
+            "param_sets": {
+                "2d_t": ((128, 256), (1, 0)),
+                "3d_0_2_1": ((4, 256, 128), (0, 2, 1)),
+                "3d_2_0_1": ((4, 256, 128), (2, 0, 1)),
+                "4d_0_2_1_3": ((2, 64, 8, 128), (0, 2, 1, 3)),
+                "4d_0_3_1_2": ((2, 8, 64, 128), (0, 3, 1, 2)),
+            },
+        },
+        (
             "test_cat",
             "test_cat_cpu",
         ): {
@@ -1898,6 +1910,15 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         compare_with_cpu(
             lambda input: torch.permute(input, dims),
             cached_randn(input_dims, dtype=torch.float16),
+        )
+
+    def test_contiguous(self, input_dims, dims):
+        # run_eager=False: eager contiguous delegates to torch.clone, which
+        # causes heap corruption in libsenlib (see test_clone).
+        compare_with_cpu(
+            lambda x: torch.permute(x, dims).contiguous(),
+            cached_randn(input_dims, dtype=torch.float16),
+            run_eager=False,
         )
 
     def test_dropout_functional(self, input, kwargs):

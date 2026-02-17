@@ -588,3 +588,10 @@ def lower_restickify(x):
 def lower_slice(x, dim=0, start=None, end=None, step=1):
     result = lowering.slice_(x, dim=dim, start=start, end=end, step=step)
     return clone(result, memory_format=torch.contiguous_format)
+
+
+@register_spyre_lowering(torch.ops.aten.contiguous.default, type_promotion_kind=None)
+def contiguous(x, *, memory_format=torch.contiguous_format):
+    if x.get_layout().is_contiguous():
+        return x
+    return clone(x, memory_format=memory_format)

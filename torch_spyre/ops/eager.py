@@ -38,6 +38,23 @@ def spyre__mm_out(
     return compiled_mm(self, mat2, out=out)
 
 
+# Register for both "spyre" (eager) and "AutogradPrivateUse1" (torch.compile / aot autograd).
+# Without the Autograd key, contiguous fails under torch.compile with
+# "Could not run 'aten::contiguous' with arguments from the 'Autogradspyre' backend".
+# Both dispatch keys use the same implementation: delegate to torch.clone so
+# that in all tracing contexts (Dynamo, AOT make_fx) aten.clone.default is
+# recorded in the FX graph rather than prims.device_put.
+@torch.library.register_kernel(  # type:ignore
+    "aten::contiguous", ["spyre", "AutogradPrivateUse1"]
+)
+def spyre__contiguous(
+    self: torch.Tensor, *, memory_format=torch.contiguous_format
+) -> torch.Tensor:
+    if self.is_contiguous(memory_format=memory_format):
+        return self
+    return torch.clone(self, memory_format=memory_format)
+
+
 @torch.library.register_kernel("aten::fill_.Scalar", ["spyre"])  # type:ignore
 def spyre__fill_scalar(
     self: torch.Tensor, other: int | float | bool | complex
