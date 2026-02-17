@@ -267,6 +267,13 @@ class TestOps(TestCase):
         y = torch.clone(x_spyre).to("cpu")
         torch.testing.assert_close(y, x, rtol=self.rtol, atol=self.atol)
 
+    def test_contiguous(self):
+        # Already-contiguous case only (transpose+contiguous can segfault / wrong values).
+        x = torch.tensor([1, 2, 3, 4], dtype=self.dtype).view(2, 2)
+        x_spyre = x.to("spyre")
+        y = x_spyre.contiguous().to("cpu")
+        torch.testing.assert_close(y, x, rtol=self.rtol, atol=self.atol)
+
     def test_add_Tensor(self):
         x = torch.tensor([1, 2, 3], dtype=self.dtype)
         y = torch.tensor([4, 5, 6], dtype=self.dtype)

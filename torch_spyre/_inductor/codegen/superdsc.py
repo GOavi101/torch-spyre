@@ -132,14 +132,34 @@ def generate_sdsc(pointers, *, op, dimensions, inputs, outputs, reduction, **kwa
             raise Unsupported(
                 f"4D transposition on dimensions {transposed_dims[0]} and {transposed_dims[1]}"
             )
-    if op == CLONE_OP:
-        return generate_clone(
-            pointers,
-            op=op,
-            dimensions=dimensions,
-            inputs=inputs,
-            outputs=outputs,
-            **kwargs,
+    if op == CLONE_OP or op == "contiguous":
+        in_layout = inputs[0]["device_layout"]
+        out_layout = outputs[0]["device_layout"]
+        # Compare layout (dim_map): same means no reordering, use plain copy.
+        need_reorder = in_layout.dim_map != out_layout.dim_map
+        if not need_reorder:
+            return generate_clone(
+                pointers,
+                op=CLONE_OP,
+                dimensions=dimensions,
+                inputs=inputs,
+                outputs=outputs,
+                **kwargs,
+            )
+        # Reorder needed: generate transpose SDSC. 2D: contiguous is col-major -> row-major.
+        nd = len(dimensions)
+        if nd == 2:
+            return generate_transpose(
+                pointers,
+                op=op,
+                dimensions=dimensions,
+                inputs=inputs,
+                outputs=outputs,
+                input_column_major=True,
+                **kwargs,
+            )
+        raise Unsupported(
+            f"clone/contiguous with layout reorder for {nd}D not yet supported"
         )
     return generate_sfp_op(
         pointers,

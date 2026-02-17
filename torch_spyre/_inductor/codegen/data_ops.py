@@ -15,7 +15,17 @@
 from torch_spyre._inductor.codegen.compute_ops import num_bytes
 
 
-def generate_transpose(pointers, *, op, dimensions, inputs, outputs, **kwargs):
+def generate_transpose(
+    pointers, *, op, dimensions, inputs, outputs, input_column_major=False, **kwargs
+):
+    # When input_column_major=False: input [mb, out] (row-major) -> output [out, mb] (col-major).
+    # When input_column_major=True:  input [out, mb] (col-major) -> output [mb, out] (row-major).
+    if input_column_major:
+        in_layout, in_stick = ["out", "mb"], ["mb"]
+        out_layout, out_stick = ["mb", "out"], ["out"]
+    else:
+        in_layout, in_stick = ["mb", "out"], ["out"]
+        out_layout, out_stick = ["out", "mb"], ["mb"]
     return {
         "reshape": {
             "numCoresUsed_": 1,
@@ -31,13 +41,13 @@ def generate_transpose(pointers, *, op, dimensions, inputs, outputs, **kwargs):
                                 "pdsName_": "pds0",
                                 "wordLength": 2,
                                 "dataformat": "SEN169_FP16",
-                                "layoutDimOrder_": ["mb", "out"],
-                                "stickDimOrder_": ["out"],
+                                "layoutDimOrder_": in_layout,
+                                "stickDimOrder_": in_stick,
                                 "dimToLayoutSize_": {
                                     "mb": dimensions[0],
                                     "out": dimensions[1],
                                 },
-                                "dimToStickSize_": {"out": 64},
+                                "dimToStickSize_": {"mb": 64} if in_stick == ["mb"] else {"out": 64},
                                 "validGap_": {
                                     "mb": [[64, 0]],
                                     "out": [[64, 0]],
@@ -84,13 +94,13 @@ def generate_transpose(pointers, *, op, dimensions, inputs, outputs, **kwargs):
                                 "pdsName_": "pds0",
                                 "wordLength": 2,
                                 "dataformat": "SEN169_FP16",
-                                "layoutDimOrder_": ["out", "mb"],
-                                "stickDimOrder_": ["mb"],
+                                "layoutDimOrder_": out_layout,
+                                "stickDimOrder_": out_stick,
                                 "dimToLayoutSize_": {
                                     "mb": dimensions[0],
                                     "out": dimensions[1],
                                 },
-                                "dimToStickSize_": {"mb": 64},
+                                "dimToStickSize_": {"mb": 64} if out_stick == ["mb"] else {"out": 64},
                                 "validGap_": {
                                     "mb": [[64, 0]],
                                     "out": [[64, 0]],
