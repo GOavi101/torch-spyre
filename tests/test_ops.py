@@ -267,6 +267,31 @@ class TestOps(TestCase):
         y = torch.clone(x_spyre).to("cpu")
         torch.testing.assert_close(y, x, rtol=self.rtol, atol=self.atol)
 
+    def test_contiguous(self):
+        # Eager: already-contiguous tensor; contiguous() returns self (or clone), values match.
+        # For transpose+contiguous use test_contiguous_compile_transpose_2d (compiled path).
+        x = torch.tensor([1, 2, 3, 4], dtype=self.dtype).view(2, 2)
+        x_spyre = x.to("spyre")
+        y = x_spyre.contiguous().to("cpu")
+        torch.testing.assert_close(y, x, rtol=self.rtol, atol=self.atol)
+
+    def test_contiguous_compile_transpose_2d(self):
+        """Compiled path: transpose then contiguous (reorder SDSC). 64x64 and 128x256."""
+        dtype = self.dtype
+
+        def f(x):
+            return x.t().contiguous()
+
+        for M, N in [(64, 64), (128, 256)]:
+            compiled_f = torch.compile(f, dynamic=False)
+            x = torch.randn(M, N, dtype=dtype).to("spyre")
+            y = compiled_f(x)
+            z = y.to("cpu")
+            expected = x.cpu().t().contiguous()
+            self.assertEqual(z.shape, (N, M))
+            self.assertEqual(z.stride(), (M, 1))
+            torch.testing.assert_close(z, expected, rtol=self.rtol, atol=self.atol)
+
     def test_add_Tensor(self):
         x = torch.tensor([1, 2, 3], dtype=self.dtype)
         y = torch.tensor([4, 5, 6], dtype=self.dtype)

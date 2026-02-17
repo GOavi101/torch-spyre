@@ -16,6 +16,7 @@ from torch_spyre._inductor.codegen.compute_ops import num_bytes
 
 
 def generate_transpose(pointers, *, op, dimensions, inputs, outputs, **kwargs):
+    """2D transpose: input [mb, out] (row-major) -> output [out, mb] (col-major)."""
     return {
         "reshape": {
             "numCoresUsed_": 1,
@@ -91,6 +92,186 @@ def generate_transpose(pointers, *, op, dimensions, inputs, outputs, **kwargs):
                                     "out": dimensions[1],
                                 },
                                 "dimToStickSize_": {"mb": 64},
+                                "validGap_": {
+                                    "mb": [[64, 0]],
+                                    "out": [[64, 0]],
+                                },
+                                "PieceInfo": [
+                                    {
+                                        "key_": "p0",
+                                        "dimToSize_": {"mb": 64, "out": 64},
+                                        "validGap_": {
+                                            "out": [[64, 0]],
+                                            "mb": [[64, 0]],
+                                        },
+                                        "PlacementInfo": [
+                                            {
+                                                "type": "hbm",
+                                                "memId": [-1],
+                                                "startAddr": [
+                                                    pointers[outputs[0]["name"]] // 128
+                                                ],
+                                            },
+                                            {
+                                                "type": "lx",
+                                                "memId": [0],
+                                                "startAddr": [16384],
+                                            },
+                                        ],
+                                    },
+                                    {
+                                        "key_": "p1",
+                                        "dimToSize_": {"mb": 64, "out": 64},
+                                        "PlacementInfo": [
+                                            {
+                                                "type": "hbm",
+                                                "memId": [-1],
+                                                "startAddr": [0],
+                                            },
+                                            {
+                                                "type": "lx",
+                                                "memId": [0],
+                                                "startAddr": [24576],
+                                            },
+                                        ],
+                                    },
+                                ],
+                                "hbmStartAddress_": pointers[outputs[0]["name"]] // 128,
+                            },
+                        ],
+                        "op": {
+                            "name": "ReStickifyOpWithPTHBM",
+                            "coreIDtoANInfo": {
+                                "0": {
+                                    "loopCount": {
+                                        "out": dimensions[0] // 64,
+                                        "mb": dimensions[1] // 64,
+                                    },
+                                    "loopCountL3SU": {
+                                        "out": dimensions[0] // 64,
+                                        "mb": dimensions[1] // 64,
+                                    },
+                                    "addr_info_": {
+                                        "l3lu": {
+                                            "type_": "stride",
+                                            "offset_": {
+                                                "mb": dimensions[0],
+                                                "out": 64,
+                                            },
+                                        },
+                                        "l3su": {
+                                            "type_": "stride",
+                                            "offset_": {
+                                                "mb": 64,
+                                                "out": dimensions[1],
+                                            },
+                                        },
+                                    },
+                                    "inpPieceOrder": [
+                                        f"p{i % 2}"
+                                        for i in range(
+                                            dimensions[0] * dimensions[1] // 4096
+                                        )
+                                    ],
+                                    "outPieceOrder": [
+                                        f"p{i % 2}"
+                                        for i in range(
+                                            dimensions[0] * dimensions[1] // 4096
+                                        )
+                                    ],
+                                }
+                            },
+                            "numClToUse": 1,
+                            "cl0ToLxOffsetLU": 0,
+                            "cl0ToLxOffsetSU": 0,
+                        },
+                    }
+                }
+            ],
+        }
+    }
+
+
+def generate_contiguous_reorder_2d(pointers, *, op, dimensions, inputs, outputs, **kwargs):
+    """2D contiguous reorder: input [out, mb] (col-major) -> output [mb, out] (row-major).
+    Used when clone/contiguous needs layout reorder (e.g. after transpose). Does not
+    modify generate_transpose, which only does row->col swap.
+    """
+    return {
+        "reshape": {
+            "numCoresUsed_": 1,
+            "dscs_": [],
+            "datadscs_": [
+                {
+                    "reshape": {
+                        "coreIdsUsed_": [0],
+                        "dimPool_": ["mb", "out"],
+                        "primaryDs_": [{"name_": "pds0", "dimNames": ["mb", "out"]}],
+                        "labeledDs_": [
+                            {
+                                "pdsName_": "pds0",
+                                "wordLength": 2,
+                                "dataformat": "SEN169_FP16",
+                                "layoutDimOrder_": ["out", "mb"],
+                                "stickDimOrder_": ["mb"],
+                                "dimToLayoutSize_": {
+                                    "mb": dimensions[0],
+                                    "out": dimensions[1],
+                                },
+                                "dimToStickSize_": {"mb": 64},
+                                "validGap_": {
+                                    "mb": [[64, 0]],
+                                    "out": [[64, 0]],
+                                },
+                                "PieceInfo": [
+                                    {
+                                        "key_": "p0",
+                                        "dimToSize_": {"mb": 64, "out": 64},
+                                        "PlacementInfo": [
+                                            {
+                                                "type": "hbm",
+                                                "memId": [-1],
+                                                "startAddr": [
+                                                    pointers[inputs[0]["name"]] // 128
+                                                ],
+                                            },
+                                            {
+                                                "type": "lx",
+                                                "memId": [0],
+                                                "startAddr": [0],
+                                            },
+                                        ],
+                                    },
+                                    {
+                                        "key_": "p1",
+                                        "dimToSize_": {"mb": 64, "out": 64},
+                                        "PlacementInfo": [
+                                            {
+                                                "type": "hbm",
+                                                "memId": [-1],
+                                                "startAddr": [0],
+                                            },
+                                            {
+                                                "type": "lx",
+                                                "memId": [0],
+                                                "startAddr": [8192],
+                                            },
+                                        ],
+                                    },
+                                ],
+                                "hbmStartAddress_": pointers[inputs[0]["name"]] // 128,
+                            },
+                            {
+                                "pdsName_": "pds0",
+                                "wordLength": 2,
+                                "dataformat": "SEN169_FP16",
+                                "layoutDimOrder_": ["mb", "out"],
+                                "stickDimOrder_": ["out"],
+                                "dimToLayoutSize_": {
+                                    "mb": dimensions[0],
+                                    "out": dimensions[1],
+                                },
+                                "dimToStickSize_": {"out": 64},
                                 "validGap_": {
                                     "mb": [[64, 0]],
                                     "out": [[64, 0]],

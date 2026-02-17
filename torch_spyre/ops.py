@@ -40,4 +40,25 @@ def spyre__fill_scalar(
     return self
 
 
+# Register for both "spyre" (eager) and "AutogradPrivateUse1" (torch.compile / aot autograd).
+# Without the Autograd key, contiguous fails under torch.compile with
+# "Could not run 'aten::contiguous' with arguments from the 'Autogradspyre' backend".
+@torch.library.register_kernel("aten::contiguous", ["spyre"])
+def spyre__contiguous(
+    self: torch.Tensor, *, memory_format=torch.contiguous_format
+) -> torch.Tensor:
+    if self.is_contiguous(memory_format=memory_format):
+        return self
+    return torch.clone(self, memory_format=memory_format)
+
+
+@torch.library.register_kernel("aten::contiguous", ["AutogradPrivateUse1"])
+def spyre__contiguous_autograd(
+    self: torch.Tensor, *, memory_format=torch.contiguous_format
+) -> torch.Tensor:
+    if self.is_contiguous(memory_format=memory_format):
+        return self
+    return torch.clone(self, memory_format=memory_format)
+
+
 # INSERT_CODEGEN_HERE
