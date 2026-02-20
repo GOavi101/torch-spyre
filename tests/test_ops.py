@@ -638,6 +638,158 @@ class TestOps(TestCase):
         with self.assertRaisesRegex(RuntimeError, "elems_per_stick"):
             x.view(16, 32)
 
+    # --- Slice (view, no copy) ---
+
+    def test_slice_dim0(self):
+        """Slice along dim 0: [4, 8] -> [2, 8] (rows 1:3)."""
+        x = torch.arange(32, dtype=self.dtype).reshape(4, 8).to("spyre")
+        y = x.slice(0, 1, 3)
+        self.assertEqual(y.shape, (2, 8))
+        expected = torch.arange(32, dtype=self.dtype).reshape(4, 8)[1:3]
+        torch.testing.assert_close(y.to("cpu"), expected, rtol=self.rtol, atol=self.atol)
+
+    def test_slice_dim1(self):
+        """Slice along dim 1: [4, 8] -> [4, 4] (cols 2:6)."""
+        x = torch.arange(32, dtype=self.dtype).reshape(4, 8).to("spyre")
+        y = x.slice(1, 2, 6)
+        self.assertEqual(y.shape, (4, 4))
+        expected = torch.arange(32, dtype=self.dtype).reshape(4, 8)[:, 2:6]
+        torch.testing.assert_close(y.to("cpu"), expected, rtol=self.rtol, atol=self.atol)
+
+    def test_slice_negative_indices(self):
+        """Slice with negative start/end (Python semantics)."""
+        x = torch.arange(24, dtype=self.dtype).reshape(4, 6).to("spyre")
+        # x[-2:-1] along dim 0 -> rows index 2:3
+        y = x.slice(0, -2, -1)
+        self.assertEqual(y.shape, (1, 6))
+        expected = torch.arange(24, dtype=self.dtype).reshape(4, 6)[-2:-1]
+        torch.testing.assert_close(y.to("cpu"), expected, rtol=self.rtol, atol=self.atol)
+
+    def test_slice_step(self):
+        """Slice with step=2 (strided view)."""
+        x = torch.arange(16, dtype=self.dtype).reshape(4, 4).to("spyre")
+        y = x.slice(0, 0, 4, 2)
+        self.assertEqual(y.shape, (2, 4))
+        expected = torch.arange(16, dtype=self.dtype).reshape(4, 4)[0:4:2]
+        torch.testing.assert_close(y.to("cpu"), expected, rtol=self.rtol, atol=self.atol)
+
+    def test_slice_is_view(self):
+        """Slice result shares storage with input (view)."""
+        x = torch.rand(4, 8, dtype=self.dtype).to("spyre")
+        y = x.slice(0, 1, 3)
+        self.assertTrue(y._is_view())
+        self.assertEqual(y.untyped_storage().data_ptr(), x.untyped_storage().data_ptr())
+
+    # --- Pad (constant mode; negative pad = crop as view) ---
+
+    def test_pad_constant_1d(self):
+        """F.pad last dim: (1, 1) -> add 1 left and right."""
+        x = torch.arange(4, dtype=self.dtype).to("spyre")
+        y = torch.nn.functional.pad(x, (1, 1), mode="constant", value=0)
+        self.assertEqual(y.shape, (6,))
+        expected = torch.nn.functional.pad(
+            torch.arange(4, dtype=self.dtype), (1, 1), mode="constant", value=0
+        )
+        torch.testing.assert_close(y.to("cpu"), expected, rtol=self.rtol, atol=self.atol)
+
+    def test_pad_constant_2d(self):
+        """F.pad last two dims: (1, 1, 2, 2)."""
+        x = torch.arange(12, dtype=self.dtype).reshape(3, 4).to("spyre")
+        y = torch.nn.functional.pad(x, (1, 1, 2, 2), mode="constant", value=0)
+        self.assertEqual(y.shape, (7, 6))
+        expected = torch.nn.functional.pad(
+            torch.arange(12, dtype=self.dtype).reshape(3, 4),
+            (1, 1, 2, 2),
+            mode="constant",
+            value=0,
+        )
+        torch.testing.assert_close(y.to("cpu"), expected, rtol=self.rtol, atol=self.atol)
+
+    def test_pad_negative_crop_view(self):
+        """Negative pad = crop; implemented as view (no copy)."""
+        x = torch.arange(16, dtype=self.dtype).reshape(4, 4).to("spyre")
+        # Crop 1 from left and 1 from right on last dim -> (4, 2)
+        y = torch.nn.functional.pad(x, (-1, -1), mode="constant", value=0)
+        self.assertEqual(y.shape, (4, 2))
+        expected = torch.arange(16, dtype=self.dtype).reshape(4, 4)[:, 1:3]
+        torch.testing.assert_close(y.to("cpu"), expected, rtol=self.rtol, atol=self.atol)
+        self.assertTrue(y._is_view())
+        self.assertEqual(y.untyped_storage().data_ptr(), x.untyped_storage().data_ptr())
+
+    def test_pad_constant_value(self):
+        """F.pad with value=5."""
+        x = torch.ones(2, 2, dtype=self.dtype).to("spyre")
+        y = torch.nn.functional.pad(x, (1, 1), mode="constant", value=5.0)
+        self.assertEqual(y.shape, (2, 4))
+        expected = torch.nn.functional.pad(
+            torch.ones(2, 2, dtype=self.dtype), (1, 1), mode="constant", value=5.0
+        )
+        torch.testing.assert_close(y.to("cpu"), expected, rtol=self.rtol, atol=self.atol)
+
+    def test_pad_eager_vs_inductor(self):
+        """F.pad on spyre — eager and torch.compile (inductor) match CPU."""
+        # Positive pad: (1, 1) constant
+        x_cpu = torch.arange(6, dtype=self.dtype).reshape(2, 3)
+        eager_cpu = torch.nn.functional.pad(x_cpu, (1, 1), mode="constant", value=0)
+        x_spyre = x_cpu.to("spyre")
+        eager_spyre = torch.nn.functional.pad(x_spyre, (1, 1), mode="constant", value=0)
+        torch.testing.assert_close(
+            eager_spyre.cpu(), eager_cpu, rtol=self.rtol, atol=self.atol
+        )
+        def fn(t):
+            return torch.nn.functional.pad(t, (1, 1), mode="constant", value=0)
+        torch._dynamo.reset_code_caches()
+        compiled_fn = torch.compile(fn, dynamic=False)
+        inductor_spyre = compiled_fn(x_spyre)
+        torch.testing.assert_close(
+            inductor_spyre.cpu(), eager_cpu, rtol=self.rtol, atol=self.atol
+        )
+        # Negative pad (crop): view path
+        eager_cpu_crop = torch.nn.functional.pad(x_cpu, (-1, -1), mode="constant", value=0)
+        eager_spyre_crop = torch.nn.functional.pad(x_spyre, (-1, -1), mode="constant", value=0)
+        torch.testing.assert_close(
+            eager_spyre_crop.cpu(), eager_cpu_crop, rtol=self.rtol, atol=self.atol
+        )
+        def fn_crop(t):
+            return torch.nn.functional.pad(t, (-1, -1), mode="constant", value=0)
+        torch._dynamo.reset_code_caches()
+        compiled_crop = torch.compile(fn_crop, dynamic=False)
+        inductor_spyre_crop = compiled_crop(x_spyre)
+        torch.testing.assert_close(
+            inductor_spyre_crop.cpu(), eager_cpu_crop, rtol=self.rtol, atol=self.atol
+        )
+
+    def test_slice_eager_vs_inductor(self):
+        """One example: slice on spyre — eager and torch.compile (inductor) match CPU."""
+        # Use aten op (tensors don't have .slice() method); dispatch routes spyre -> our kernel
+        slice_op = torch.ops.aten.slice.Tensor
+        # CPU reference: rows 1:3 -> (2, 6)
+        x_cpu = torch.arange(24, dtype=self.dtype).reshape(4, 6)
+        eager_cpu = slice_op(x_cpu, 0, 1, 3, 1)
+
+        # Eager on spyre
+        x_spyre = x_cpu.to("spyre")
+        eager_spyre = slice_op(x_spyre, 0, 1, 3, 1)
+        torch.testing.assert_close(
+            eager_spyre.cpu(), eager_cpu, rtol=self.rtol, atol=self.atol
+        )
+
+        # torch.compile (inductor) on spyre
+        def fn(t):
+            return slice_op(t, 0, 1, 3, 1)
+
+        torch._dynamo.reset_code_caches()
+        compiled_fn = torch.compile(fn, dynamic=False)
+        inductor_spyre = compiled_fn(x_spyre)
+        torch.testing.assert_close(
+            inductor_spyre.cpu(), eager_cpu, rtol=self.rtol, atol=self.atol
+        )
+
+        # Eager and inductor on spyre must match
+        torch.testing.assert_close(
+            eager_spyre.cpu(), inductor_spyre.cpu(), rtol=self.rtol, atol=self.atol
+        )
+
     @unittest.skip("TODO: Needs more debug")
     def test_all_ops(self):
         def test_op(declaration):

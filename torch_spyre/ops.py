@@ -14,7 +14,7 @@
 
 import torch
 import torch_spyre.fallbacks  # noqa: F401
-from typing import Optional, Union
+from typing import List, Optional, Union
 
 
 def maybe_wrap_dim(dim, ndims):
@@ -183,6 +183,176 @@ def spyre__unsqueeze(self: torch.Tensor, dim: int) -> torch.Tensor:
         self, sizes, strides, self.storage_offset(), new_stl
     )
     return result
+
+
+def infer_slice_geometry(
+    tensor: torch.Tensor,
+    dim: int,
+    start: Optional[int],
+    end: Optional[int],
+    step: int,
+):
+    """
+    Compute new sizes, strides, and storage offset for slice along one dimension.
+    Matches PyTorch slice.Tensor semantics (view, no copy).
+    """
+    ndim = tensor.dim()
+    if ndim == 0:
+        raise RuntimeError("slice() cannot be applied to a 0-dim tensor")
+    dim = maybe_wrap_dim(dim, ndim)
+    dim_size = tensor.size(dim)
+    if step == 0:
+        raise RuntimeError("slice step cannot be zero")
+
+    if start is None:
+        start_val = 0 if step > 0 else dim_size - 1
+    else:
+        start_val = start + dim_size if start < 0 else start
+        start_val = max(0, min(dim_size, start_val))
+
+    if end is None:
+        end_val = dim_size if step > 0 else -1
+    else:
+        end_val = end + dim_size if end < 0 else end
+        end_val = max(0, min(dim_size, end_val))
+
+    if step > 0:
+        length = max(0, (end_val - start_val + step - 1) // step)
+    else:
+        length = max(0, (start_val - end_val - step - 1) // (-step))
+
+    new_sizes = list(tensor.size())
+    new_sizes[dim] = length
+    new_strides = list(tensor.stride())
+    new_strides[dim] = tensor.stride(dim) * step
+    new_storage_offset = tensor.storage_offset() + start_val * tensor.stride(dim)
+
+    current_stl = tensor.device_tensor_layout()
+    # Preserve the original layout and only change the size of the sliced dimension.
+    # This keeps device/host dimension mapping so copy produces correct host shape.
+    new_device_size = list(current_stl.device_size)
+    new_dim_map = list(current_stl.dim_map)
+    old_host_size = tensor.size(dim)
+    for i, host_dim in enumerate(new_dim_map):
+        if host_dim == dim and new_device_size[i] == old_host_size:
+            # This device dimension is the logical size for the sliced host dim (not stick).
+            new_device_size[i] = length
+    new_stl = torch_spyre._C.SpyreTensorLayout(
+        new_device_size, new_dim_map, current_stl.device_dtype
+    )
+    return new_sizes, new_strides, new_storage_offset, new_stl
+
+
+@torch.library.register_kernel("aten::slice.Tensor", ["spyre"])
+def spyre__slice_Tensor(
+    self: torch.Tensor,
+    dim: int = 0,
+    start: Optional[int] = None,
+    end: Optional[int] = None,
+    step: int = 1,
+) -> torch.Tensor:
+    """Slice along one dimension (view, no copy). Implemented in Python in ops.py."""
+    new_sizes, new_strides, new_storage_offset, new_stl = infer_slice_geometry(
+        self, dim, start, end, step
+    )
+    return torch_spyre._C.as_strided_with_layout(
+        self, new_sizes, new_strides, new_storage_offset, new_stl
+    )
+
+
+def _to_int(x: Union[int, torch.SymInt]) -> int:
+    """Coerce SymInt or int to int for use in pad/slice logic."""
+    if hasattr(x, "guard_int"):
+        return x.guard_int("pad", 0)
+    return int(x)
+
+
+def _pad_parse_and_check(
+    tensor: torch.Tensor,
+    pad: Union[List[int], tuple],
+    mode: str,
+    value: Optional[float],
+) -> tuple:
+    """
+    Parse pad list and check mode. Pad format: (last_dim_left, last_dim_right,
+    second_last_left, second_last_right, ...). Returns (ndim_padded, pad_per_dim)
+    where pad_per_dim entries are (d, pad_before, pad_after) for each padded dim d.
+    """
+    pad = [_to_int(p) for p in pad]
+    ndim = tensor.dim()
+    if len(pad) % 2 != 0:
+        raise RuntimeError("Padding length must be even")
+    k = len(pad) // 2
+    if k > ndim:
+        raise RuntimeError(
+            f"Padding length {len(pad)} implies {k} dimensions but tensor has {ndim}"
+        )
+    if mode != "constant":
+        raise RuntimeError(
+            f"pad on spyre only supports mode='constant', got mode='{mode}'"
+        )
+    pad_per_dim = []
+    for i in range(k):
+        d = ndim - 1 - i  # dimension index (last dim first)
+        pad_before = pad[2 * i]
+        pad_after = pad[2 * i + 1]
+        pad_per_dim.append((d, pad_before, pad_after))
+    return k, pad_per_dim
+
+
+@torch.library.register_kernel("aten::pad", ["spyre"])
+def spyre__pad(
+    self: torch.Tensor,
+    pad: List[int],
+    mode: str = "constant",
+    value: Optional[float] = None,
+) -> torch.Tensor:
+    """
+    Pad (or crop when pad values are negative) on spyre.
+    - Negative pad: crop (view, no copy), implemented via slice.
+    - Positive pad: allocate, fill with value, copy input into center (copy).
+    Only mode='constant' is supported on device.
+    """
+    fill_value = value if value is not None else 0.0
+    k, pad_per_dim = _pad_parse_and_check(self, pad, mode, value)
+
+    ndim = self.dim()
+    sizes = list(self.size())
+
+    all_non_positive = all(pb <= 0 and pa <= 0 for _, pb, pa in pad_per_dim)
+
+    if all_non_positive:
+        # Crop only: implement as a view via successive slices (no copy)
+        slice_op = torch.ops.aten.slice.Tensor
+        result = self
+        for d, pad_before, pad_after in pad_per_dim:
+            start_d = max(0, -pad_before)
+            end_d = sizes[d] + pad_after  # pad_after <= 0 so this crops from end
+            end_d = max(start_d, min(sizes[d], end_d))
+            result = slice_op(result, d, start_d, end_d, 1)
+            sizes[d] = end_d - start_d
+        return result
+
+    # At least one positive pad: allocate output, fill, then copy input into place
+    new_sizes = list(self.size())
+    for d, pad_before, pad_after in pad_per_dim:
+        new_sizes[d] = sizes[d] + pad_before + pad_after
+        if new_sizes[d] < 0:
+            raise RuntimeError(
+                f"pad would make dimension {d} negative: "
+                f"size {sizes[d]} + {pad_before} + {pad_after}"
+            )
+
+    out = torch.empty(new_sizes, dtype=self.dtype, device=self.device)
+    out.fill_(fill_value)
+
+    # Destination view: out[pad_before_d : pad_before_d+size_d, ...] for each dim
+    slice_op = torch.ops.aten.slice.Tensor
+    dest = out
+    for d, pad_before, _ in pad_per_dim:
+        dest = slice_op(dest, d, pad_before, pad_before + self.size(d), 1)
+    dest.copy_(self)
+    return out
 
 
 # INSERT_CODEGEN_HERE

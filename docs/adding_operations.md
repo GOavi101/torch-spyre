@@ -3,6 +3,22 @@
 This document describe the common patterns used to define operations
 in the front-end compiler.
 
+### View operations (no data copy)
+
+View operations on Spyre use `as_strided_with_layout` (C++) so they share
+storage with the base tensor and do not copy data:
+
+- **aten::slice.Tensor** — Implemented in [ops.py](../torch_spyre/ops.py) as a view: `infer_slice_geometry` computes new sizes, strides, storage offset, and a layout derived from the original (only the sliced dimension’s size changes); result is `as_strided_with_layout(...)`.
+- **aten::pad** (negative pad only) — Negative pad values mean “crop”; implemented as a view by applying `aten::slice.Tensor` per dimension (no allocation).
+- **aten::transpose.int**, **aten::squeeze**, **aten::unsqueeze** — Implemented as views in ops.py via `as_strided_with_layout` with an updated layout.
+- **aten::view**, **aten::_unsafe_view** — Implemented in C++ ([spyre_views.cpp](../torch_spyre/csrc/spyre_views.cpp)) via `compute_view_layout` and `spyre_alias_with_sizes_and_strides`.
+
+Copying a view back to CPU (e.g. `.cpu()`) uses a row-by-row path when `storage_offset != 0` so the runtime’s single-dcsi behaviour still produces the correct result.
+
+### Slice and pad: decomposition and lowering
+
+- **aten::slice.Tensor** and **aten::pad** have eager kernels in [ops.py](../torch_spyre/ops.py) and **lowerings** in [lowering.py](../torch_spyre/_inductor/lowering.py) that delegate to inductor’s `make_fallback`, so they run as eager ops at runtime inside compiled graphs. There are **no** decompositions for them; lowering produces a `FallbackKernel` that calls the registered spyre kernel. Stickify and core_division handle `FallbackKernel` (see [stickify.py](../torch_spyre/_inductor/stickify.py), [core_division.py](../torch_spyre/_inductor/core_division.py)).
+
 ### Direct mapping from ATen to OpFunc
 
 If a pointwise ATen operation can be implemented with a single Spyre OpFunc,

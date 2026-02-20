@@ -461,3 +461,40 @@ def lower_clamp(x, min=None, max=None):
     )
     pw.realize()
     return pw
+
+
+# Slice and pad: lower to FallbackKernel so they run as eager ops at runtime
+# (our kernels are in torch_spyre/ops.py). No decomposition; no custom IR lowering.
+# Add to inductor fallbacks set so the lowering wrapper allows them (no "out= not supported").
+lowering.fallbacks.add(torch.ops.aten.slice.Tensor)
+lowering.fallbacks.add(torch.ops.aten.pad)
+
+
+def _make_fallback_if_available(op, *args, **kwargs):
+    """Use inductor's make_fallback or fallback_handler so the op runs at runtime."""
+    make_fallback = getattr(lowering, "make_fallback", None)
+    if make_fallback is not None:
+        return make_fallback(op, *args, **kwargs)
+    fallback_handler = getattr(lowering, "fallback_handler", None)
+    if fallback_handler is not None:
+        return fallback_handler(op)(*args, **kwargs)
+    raise NotImplementedError(
+        f"Spyre lowering for {op} requires inductor make_fallback or fallback_handler; "
+        "op will run eagerly when encountered in compiled graphs."
+    )
+
+
+@register_spyre_lowering(torch.ops.aten.slice.Tensor)
+def lower_aten_slice_Tensor(x, dim, start, end, step):
+    """Lower aten::slice.Tensor to fallback (eager op at runtime)."""
+    return _make_fallback_if_available(
+        torch.ops.aten.slice.Tensor, x, dim, start, end, step
+    )
+
+
+@register_spyre_lowering(torch.ops.aten.pad)
+def lower_aten_pad(x, pad, mode="constant", value=None):
+    """Lower aten::pad to fallback (eager op at runtime)."""
+    return _make_fallback_if_available(
+        torch.ops.aten.pad, x, pad, mode, value
+    )

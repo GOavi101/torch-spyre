@@ -106,6 +106,47 @@ auto get_dim_device_stride(int dim, int stick_size,
 }
 
 /*
+ * Convert host (logical) storage_offset to device element offset.
+ * Used when copying device->host so we read from the correct device position
+ * for a view (e.g. slice) that has a non-zero storage offset in host layout.
+ */
+int64_t host_storage_offset_to_device_offset(c10::IntArrayRef sizes,
+                                            c10::IntArrayRef strides,
+                                            int64_t storage_offset,
+                                            SpyreTensorLayout stl,
+                                            std::vector<int64_t> device_sizes) {
+  const int ndim = static_cast<int>(sizes.size());
+  if (ndim == 0) {
+    return 0;
+  }
+  // Decompose storage_offset into host multi-index using strides.
+  std::vector<int64_t> host_idx(ndim);
+  int64_t rem = storage_offset;
+  for (int d = 0; d < ndim; d++) {
+    host_idx[d] = rem / strides[d];
+    rem = rem % strides[d];
+  }
+  // Build device strides in the same order as get_device_stride_info (loop
+  // order): stride[0]=1, stride[i] = stride[i-1] * device_sizes[i-1].
+  std::vector<int64_t> dev_strides_loop;
+  dev_strides_loop.push_back(1);
+  for (size_t i = 1; i < device_sizes.size(); i++) {
+    dev_strides_loop.push_back(dev_strides_loop.back() *
+                               device_sizes[i - 1]);
+  }
+  // Loop order: dim_map[size-1] (stick), dim_map[size-2], ... So device offset
+  // = sum over i of host_idx[dim_map[size-1-i]] * dev_strides_loop[i].
+  int64_t device_offset = 0;
+  const size_t n = stl.dim_map.size();
+  for (size_t i = 0; i < n && i < dev_strides_loop.size(); i++) {
+    int host_dim = stl.dim_map[n - 1 - i];
+    int64_t idx = (host_dim >= 0 && host_dim < ndim) ? host_idx[host_dim] : 0;
+    device_offset += idx * dev_strides_loop[i];
+  }
+  return device_offset;
+}
+
+/*
  * Fills out size and strides for each dimension of the tensor.
  *
  * @param sizes: dimension sizes of the CPU tensor
@@ -117,7 +158,8 @@ auto get_dim_device_stride(int dim, int stick_size,
  */
 auto get_device_stride_info(c10::IntArrayRef sizes, c10::IntArrayRef strides,
                             SpyreTensorLayout stl, int stick_size,
-                            std::vector<int64_t> device_sizes, bool host2device)
+                            std::vector<int64_t> device_sizes, bool host2device,
+                            int64_t storage_offset)
     -> DataConversionStrideInfo {
   DataConversionStrideInfo stride_info;
   auto cpu_shape = sizes.vec();
@@ -153,7 +195,8 @@ auto get_device_stride_info(c10::IntArrayRef sizes, c10::IntArrayRef strides,
       stride_info.size_[i] -= 1;
     }
   }
-  stride_info.offset_src_ = 0;
+  // Use storage_offset so views (e.g. slice) copy from the correct base.
+  stride_info.offset_src_ = storage_offset;
   stride_info.offset_dst_ = 0;
 
   // pull single value from stick if sparse tensor
@@ -192,7 +235,8 @@ auto get_device_stride_info(c10::IntArrayRef sizes, c10::IntArrayRef strides,
  */
 auto get_device_stride_infos(c10::IntArrayRef sizes, c10::IntArrayRef strides,
                              SpyreTensorLayout stl,
-                             std::vector<int64_t> dev_shape, bool host2device)
+                             std::vector<int64_t> dev_shape, bool host2device,
+                             int64_t storage_offset)
     -> std::vector<DataConversionStrideInfo> {
   std::vector<DataConversionStrideInfo> dcsi;
   auto cpu_shape = sizes.vec();
@@ -207,7 +251,7 @@ auto get_device_stride_infos(c10::IntArrayRef sizes, c10::IntArrayRef strides,
   DataConversionStrideInfo stride_info;
 
   stride_info = get_device_stride_info(sizes, strides, stl, stick_size,
-                                       dev_shape, host2device);
+                                       dev_shape, host2device, storage_offset);
   dcsi.push_back(stride_info);
 
   if (requires_padding && !size_less_than_stick) {
@@ -257,15 +301,27 @@ auto generate_dci(const at::Tensor* tensor, SpyreTensorLayout stl,
   dci.isHostToSen_ = host2device;
   dci.dataformat_src_ = host2device ? dtype_cpu : dtype_dev;
   dci.dataformat_dst_ = host2device ? dtype_dev : dtype_cpu;
-  // Reverse PyTorch ordering
+  // Reverse PyTorch ordering for the copy loop (dcsi uses reversed shapes).
   auto dev_shape = stl.device_size;
-  std::reverse(cpu_shape.begin(), cpu_shape.end());
+  std::vector<int64_t> cpu_shape_reversed = cpu_shape;
+  std::reverse(cpu_shape_reversed.begin(), cpu_shape_reversed.end());
   std::reverse(dev_shape.begin(), dev_shape.end());
-  dci.dcsi_ = get_device_stride_infos(tensor->sizes(), tensor->strides(), stl,
-                                      dev_shape, host2device);
+  // When copying device->host, storage_offset is in host layout; convert to
+  // device offset so we read from the correct position for views (e.g. slice).
+  int64_t src_offset = host2device
+                           ? tensor->storage_offset()
+                           : host_storage_offset_to_device_offset(
+                                 tensor->sizes(), tensor->strides(),
+                                 tensor->storage_offset(), stl, dev_shape);
+  dci.dcsi_ = get_device_stride_infos(
+      tensor->sizes(), tensor->strides(), stl, dev_shape, host2device,
+      src_offset);
 
-  dci.input_shape_ = host2device ? cpu_shape : dev_shape;
-  dci.output_shape_ = host2device ? dev_shape : cpu_shape;
+  dci.input_shape_ = host2device ? cpu_shape_reversed : dev_shape;
+  // Output shape: use unreversed CPU shape when device->host so runtime
+  // interprets the written buffer as (2,6) not (6,2).
+  dci.output_shape_ =
+      host2device ? dev_shape : tensor->sizes().vec();
   dci.exportJson(s);
   DEBUGINFO("DataConversionInfo: ", s.str());
   return s.str();
@@ -663,7 +719,33 @@ at::Tensor spyre_copy_from(const at::Tensor& self, const at::Tensor& dst,
     return dst;
 
   } else if (self.is_privateuseone() && dst.is_cpu()) {
-    copy_device_to_host(self, dst);
+    // When the device tensor is a view (storage_offset != 0), the runtime may
+    // only honour the first dcsi; copy row-by-row so each call has one dcsi.
+    if (self.storage_offset() != 0 && self.dim() >= 1) {
+      const int64_t n_rows = self.size(0);
+      const int64_t row_size =
+          (n_rows > 0) ? (self.numel() / n_rows) : self.numel();
+      SpyreTensorLayout stl = get_spyre_tensor_layout(self);
+      // Layout for a single row: same dim_map, device_size with host dim 0 set to 1.
+      std::vector<int64_t> row_device_size(stl.device_size.begin(),
+                                           stl.device_size.end());
+      for (size_t i = 0; i < stl.dim_map.size(); i++) {
+        if (stl.dim_map[i] == 0) {
+          row_device_size[i] = 1;
+        }
+      }
+      SpyreTensorLayout row_stl(row_device_size, stl.dim_map, stl.device_dtype);
+      for (int64_t r = 0; r < n_rows; r++) {
+        at::Tensor self_row = as_strided_with_layout(
+            self, {row_size}, {1},
+            self.storage_offset() + r * self.stride(0), row_stl);
+        at::Tensor dst_row =
+            dst.as_strided({row_size}, {1}, r * dst.stride(0));
+        copy_device_to_host(self_row, dst_row);
+      }
+    } else {
+      copy_device_to_host(self, dst);
+    }
     return dst;
 
   } else if (self.is_privateuseone() && dst.is_privateuseone()) {
