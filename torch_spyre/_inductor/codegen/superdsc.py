@@ -17,6 +17,7 @@ from torch_spyre._inductor.constants import (
     BATCH_MATMUL_OP,
     TRANSPOSE_OP,
     CLONE_OP,
+    PAD_OP,
 )
 from torch_spyre._inductor.errors import Unsupported
 from torch_spyre._inductor.logging_utils import get_inductor_logger
@@ -28,6 +29,7 @@ from .data_ops import (
     generate_transpose_3d_stick,
     generate_transpose_4d_stick,
     generate_identity,
+    generate_pad,
 )
 
 logger = get_inductor_logger("codegen.superdsc")
@@ -155,6 +157,15 @@ def generate_sdsc(pointers, *, op, dimensions, inputs, outputs, reduction, **kwa
             )
     if op == CLONE_OP:
         return generate_identity(
+            pointers,
+            op=op,
+            dimensions=dimensions,
+            inputs=inputs,
+            outputs=outputs,
+            **kwargs,
+        )
+    if op == PAD_OP:
+        return generate_pad(
             pointers,
             op=op,
             dimensions=dimensions,

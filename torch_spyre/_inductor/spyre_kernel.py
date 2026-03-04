@@ -37,6 +37,7 @@ from .constants import (
     BATCH_MATMUL_OP,
     TRANSPOSE_OP,
     CLONE_OP,
+    PAD_OP,
 )
 from .errors import Unsupported
 from .ir import FixedTiledLayout
@@ -477,8 +478,34 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
             ]
             in_stl = args[0].device_layout  # type: ignore[union-attr]
             out_stl = args[1].device_layout  # type: ignore[union-attr]
-            # Determine data op based on tensor args
-            if (
+            # Determine data op based on tensor args.
+            # PAD is checked before TRANSPOSE: a right-pad shares the same
+            # Counter(dim_map) + device_size-mismatch signature as TRANSPOSE,
+            # so PAD must be disambiguated first.
+            if all(is_wildcard(d.var) for d in in_di) and not all(
+                is_wildcard(d.var) for d in out_di
+            ):
+                # Broadcast: scalar input (all dims wildcards) expanding to non-scalar output.
+                op = CLONE_OP
+                in_di = out_di
+                args[0] = self.create_tensor_arg(True, value.name, value, in_di)
+            elif (
+                len(in_di) == len(out_di)
+                and all(
+                    out_di[i].numel >= in_di[i].numel
+                    for i in range(len(in_di))
+                )
+                and [d.numel for d in in_di] != [d.numel for d in out_di]
+                # device_size mismatch is implied (clone branch below
+                # catches equal device_size), but assert for safety.
+                and in_stl.device_size != out_stl.device_size
+            ):
+                # Pad: output is element-wise >= input and strictly larger.
+                op = PAD_OP
+            elif in_stl.device_size == out_stl.device_size:
+                # Clone: check that device layout is the same.
+                op = CLONE_OP
+            elif (
                 Counter(in_stl.dim_map) == Counter(out_stl.dim_map)
                 and in_stl.device_size != out_stl.device_size
             ) or (Counter(in_di) == Counter(out_di) and in_di != out_di):
@@ -486,21 +513,15 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
                 #   - check that the input / output DimensionInfo are the same, but in different order.
                 #   - check that the dim map has the same dimensions (no duplicate dimensions), but device size differs.
                 op = TRANSPOSE_OP
-            elif all(is_wildcard(d.var) for d in in_di) and not all(
-                is_wildcard(d.var) for d in out_di
-            ):
-                # Broadcast: scalar input (all dims wildcards) expanding to non-scalar output.
-                op = CLONE_OP
-                in_di = out_di
-                args[0] = self.create_tensor_arg(True, value.name, value, in_di)
-            elif in_stl.device_size == out_stl.device_size:
-                # Clone: check that device layout is the same.
-                op = CLONE_OP
             else:
                 # Unsupported data operation on TensorArg
                 raise Unsupported(f"Data operation {args[0]})=>{args[1]}")
 
-            op_spec = create_op_spec(op, False, out_di, args, op_info)
+            # For pad, kernel dimensions must be output (padded) size for correct allocation.
+            di_for_spec = out_di if op == PAD_OP else in_di
+            op_spec = create_op_spec(op, False, di_for_spec, args, op_info)
+            if op == PAD_OP:
+                op_spec.op_info["input_dimensions"] = [d.numel for d in in_di]
             if op == TRANSPOSE_OP:
                 op_spec.op_info["transposed_dims"] = [
                     d for d in range(len(in_di)) if in_di[d] != out_di[d]
