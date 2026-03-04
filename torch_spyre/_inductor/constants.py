@@ -15,6 +15,7 @@
 BATCH_MATMUL_OP = "batchmatmul"
 CLONE_OP = "clone"
 MATMUL_REDUCTION_OP = "matmul"
+PAD_OP = "pad"
 TRANSPOSE_OP = "transpose"
 
 DEVICE_NAME = "spyre"
@@ -46,6 +47,7 @@ SPYRE_FP32_OPS = [
     "exx2",
     "layernormnorm",
     "clone",
+    "pad",
 ]
 
 LAYOUT_INPUT_LABELS = ["INPUT", "KERNEL", "KERNEL_IDX"]

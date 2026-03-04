@@ -39,6 +39,7 @@ from .constants import (
     BATCH_MATMUL_OP,
     TRANSPOSE_OP,
     CLONE_OP,
+    PAD_OP,
 )
 from .errors import Unsupported
 from .ir import FixedTiledLayout
@@ -508,6 +509,20 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
                 ):
                     # Clone: check that device layout is the same.
                     op = CLONE_OP
+                elif (
+                    len(args[0].host_size) == len(args[1].host_size)
+                    and all(
+                        args[1].host_size[i] >= args[0].host_size[i]
+                        for i in range(len(args[0].host_size))
+                    )
+                    and args[0].host_size != args[1].host_size
+                    # device_size mismatch is implied (clone branch above
+                    # catches equal device_size), but assert for safety.
+                    and args[0].device_layout.device_size
+                    != args[1].device_layout.device_size
+                ):
+                    # Pad: output is element-wise >= input and strictly larger.
+                    op = PAD_OP
                 else:
                     # Unsupported data operation on TensorArg
                     raise Unsupported(f"Data operation {args[0]})=>{args[1]}")
@@ -515,8 +530,10 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
                 # Unsupported data operation on ConstantArg
                 raise Unsupported(f"Data operation on {type(args[0])}")
 
-            ks = create_kernel_spec(op, False, in_di, args, scales, op_info)
-            if in_di != out_di:
+            # For pad, kernel dimensions must be output (padded) size for correct allocation.
+            di_for_spec = out_di if op == PAD_OP else in_di
+            ks = create_kernel_spec(op, False, di_for_spec, args, scales, op_info)
+            if in_di != out_di and op != PAD_OP:
                 ks.op_info["transposed_dims"] = [
                     d for d in range(len(in_di)) if in_di[d].var != out_di[d].var
                 ]

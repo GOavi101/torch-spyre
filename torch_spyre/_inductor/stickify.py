@@ -181,6 +181,15 @@ def pointwise_layout(n: SchedulerNode, args: list[SchedNodeArg]) -> FixedTiledLa
                         raise Unsupported(
                             f"Spyre limitation: incompatible device sizes: {op}({in_size})=>{out_size}) "
                         )
+                elif (
+                    len(in_size) == len(out_size)
+                    and all(out_size[i] >= in_size[i] for i in range(len(in_size)))
+                    and in_size != out_size
+                ):
+                    # Pad: output is element-wise >= input. Use default row-major tiling.
+                    stl = SpyreTensorLayout(
+                        output.size, output.dtype, list(range(len(output.size)))
+                    )
                 else:
                     # This should have been rejected by PyTorch. This is not a legal operation.
                     raise Unsupported(f"size mismatch: {op}({in_size})=>{out_size}) ")
