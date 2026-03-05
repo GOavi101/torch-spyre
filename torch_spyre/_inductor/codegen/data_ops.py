@@ -1160,12 +1160,19 @@ def generate_identity(pointers, *, op, dimensions, inputs, outputs, **kwargs):
 def generate_pad(pointers, *, op, dimensions, inputs, outputs, **kwargs):
     """Emit pad as identity-style op: copy input (small) to output (padded) buffer.
 
-    dimensions are the output (padded) dimensions. Input dimensions are taken
-    from inputs[0]["host_size"]. The backend must interpret identity with
-    different input/output sizes as pad (copy input into center of output).
+    ``dimensions`` are the *output* (padded) dimensions.  Input dimensions are
+    taken from ``inputs[0]["host_size"]``.
 
-    NOTE: This assumes the backend zeros the output buffer before executing
-    the identity copy, so that padded regions contain zeros.
+    The *operation space* is the input tensor: the DSC iterates over ``N =
+    input_dimensions`` elements, reading from the small input buffer and
+    writing to the beginning of the larger output buffer.  The backend
+    interprets the size mismatch as implicit padding — only ``input_size``
+    elements are written; the remaining gap at the end of each dimension is
+    left as-is (the backend is expected to zero the output buffer before the
+    copy, giving zero-valued padding).
+
+    NOTE: For non-zero fill values, the gap will contain zeros (not the fill
+    value) when run through the DSC.  Use the eager CPU path for non-zero fill.
     """
     tensors = inputs + outputs
     input_dtype = inputs[0]["device_layout"].device_dtype
@@ -1177,26 +1184,15 @@ def generate_pad(pointers, *, op, dimensions, inputs, outputs, **kwargs):
 
     cores = 1
 
-    # Op space is the output (padded) tensor
-    op_dims_tensor = outputs[0]
-    dl_out = op_dims_tensor["device_layout"]
-    dim_map = dl_out.dim_map[::-1][1:]
+    # The *operation space* is the input tensor — we iterate over input
+    # elements and copy them to the beginning of the (larger) output buffer.
+    op_dims_tensor = inputs[0]
+    dl_in = op_dims_tensor["device_layout"]
+    dim_map = dl_in.dim_map[::-1][1:]
     dim_labels = INPUT_DIM_LABELS[: ndim - 1] + OUTPUT_DIM_LABELS[:1]
     dim_splits = [1] * (ndim - 1) + [cores]
 
-    # Output (padded) dim_infos
-    padded_output_dimensions = [
-        get_device_size(host_dim, op_dims_tensor) for host_dim in range(ndim)
-    ]
-    dim_infos_output = DimInfos(
-        dim_map,
-        dim_labels,
-        dimensions,
-        padded_output_dimensions,
-        dim_splits,
-    )
-
-    # Input (small) dim_infos for per-tensor allocate/coordinates
+    # Input (small) dim_infos — defines the iteration / operation space
     padded_input_dimensions = [
         get_device_size(host_dim, inputs[0]) for host_dim in range(ndim)
     ]
@@ -1208,11 +1204,25 @@ def generate_pad(pointers, *, op, dimensions, inputs, outputs, **kwargs):
         dim_splits,
     )
 
-    layouts = create_tensor_specific_layouts(
-        tensors, dim_infos_output, op, op_dims_tensor=op_dims_tensor
+    # Output (padded) dim_infos — used for per-tensor allocate / coordinates
+    padded_output_dimensions = [
+        get_device_size(host_dim, outputs[0]) for host_dim in range(ndim)
+    ]
+    dim_infos_output = DimInfos(
+        dim_map,
+        dim_labels,
+        dimensions,
+        padded_output_dimensions,
+        dim_splits,
     )
 
-    op_stick_labels = dim_infos_output.get_tensor_stick_dim_labels(op_dims_tensor)
+    # Layouts are computed over the *input* op space
+    layouts = create_tensor_specific_layouts(
+        tensors, dim_infos_input, op, op_dims_tensor=op_dims_tensor
+    )
+
+    # Stick-dimension labels from the input tensor (operation space)
+    op_stick_labels = dim_infos_input.get_tensor_stick_dim_labels(op_dims_tensor)
     core_id_to_wk_slice = {}
     for i in range(cores):
         core_id_to_wk_slice[str(i)] = {
@@ -1220,11 +1230,16 @@ def generate_pad(pointers, *, op, dimensions, inputs, outputs, **kwargs):
         }
 
     def dim_infos_for_tensor(tensor_index):
+        """Input tensors use input dim_infos; output tensors use output dim_infos."""
         return dim_infos_input if tensor_index < len(inputs) else dim_infos_output
 
-    # The top-level key is "clone" intentionally: pad is implemented as a
-    # clone/identity op where input and output buffers have different sizes.
-    # The backend interprets the size mismatch as implicit padding.
+    # The top-level key is "clone" intentionally: pad reuses the clone / identity
+    # SDSC structure but with mismatched input / output buffer sizes.  The
+    # backend copies ``N = input_size`` elements from the input buffer to the
+    # beginning of the larger output buffer, leaving the gap at the end of each
+    # dimension untouched (zero-filled by the backend's output-buffer zeroing).
+    # Setting N_ from dim_infos_input ensures the DSC iterates over the correct
+    # number of elements — the padded *output* dimensions would be too large.
     return {
         "clone": {
             "sdscFoldProps_": [{"factor_": 1, "label_": "time"}],
@@ -1237,8 +1252,10 @@ def generate_pad(pointers, *, op, dimensions, inputs, outputs, **kwargs):
             "coreletFoldProp_": {"factor_": 1, "label_": "corelet"},
             "numCoresUsed_": cores,
             "coreIdToDsc_": {str(c): 0 for c in range(cores)},
+            # numWkSlicesPerDim_ / N_ / dataStageParam_ all reflect the INPUT
+            # (operation) space, not the padded output space.
             "numWkSlicesPerDim_": {
-                di.label: di.nsplits for di in dim_infos_output.get_op_infos()
+                di.label: di.nsplits for di in dim_infos_input.get_op_infos()
             },
             "coreIdToWkSlice_": core_id_to_wk_slice,
             "coreIdToDscSchedule": {str(c): [[-1, 0, 0, 0]] for c in range(cores)},
@@ -1248,11 +1265,12 @@ def generate_pad(pointers, *, op, dimensions, inputs, outputs, **kwargs):
                         "numCoresUsed_": cores,
                         "numCoreletsUsed_": 1,
                         "coreIdsUsed_": [c for c in range(cores)],
+                        # N_ = number of elements to copy = INPUT dimensions
                         "N_": {
                             "name_": "n",
                             **{
                                 di.label + "_": di.padded_size
-                                for di in dim_infos_output.get_op_infos()
+                                for di in dim_infos_input.get_op_infos()
                             },
                         },
                         "dataStageParam_": {
@@ -1261,14 +1279,14 @@ def generate_pad(pointers, *, op, dimensions, inputs, outputs, **kwargs):
                                     "name_": "core",
                                     **{
                                         di.label + "_": di.split_size
-                                        for di in dim_infos_output.get_op_infos()
+                                        for di in dim_infos_input.get_op_infos()
                                     },
                                 },
                                 "el_": {
                                     "name_": "core",
                                     **{
                                         di.label + "_": di.split_size
-                                        for di in dim_infos_output.get_op_infos()
+                                        for di in dim_infos_input.get_op_infos()
                                     },
                                 },
                             }

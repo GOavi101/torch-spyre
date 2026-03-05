@@ -321,3 +321,30 @@ def lt_decomp(
     out_le = torch.le(input, other).to(dtype=torch.float16)
     out_ne = torch.ne(input, other).to(dtype=torch.float16)
     return torch.mul(out_le, out_ne, out=out).to(dtype=torch.bool)
+
+
+@register_spyre_decomposition([torch.ops.aten.logical_not])
+def logical_not_decomp(input: torch.Tensor) -> torch.Tensor:
+    # Currently falling back to torch.zeros_like for dtypes other than bool
+    # This is needed until scalar False/0.0 or constant tensor [False]/[0.0] is supported
+    if input.dtype is torch.bool:
+        zero = torch.ne(input, input)
+    else:
+        zero = torch.zeros_like(input)
+    return torch.eq(input, zero)
+
+
+@register_spyre_decomposition([torch.ops.aten.constant_pad_nd])
+def constant_pad_nd_decomp(
+    input: torch.Tensor,
+    pad: list[int],
+    value: float = 0.0,
+) -> torch.Tensor:
+    """
+    Decompose ``aten.constant_pad_nd`` to ``spyre::pad`` for the compiled path.
+
+    For zero fill values, the lowering emits a PAD_OP DSC kernel that copies
+    the input to the beginning of a zeroed output buffer.  For non-zero fill
+    values, ``spyre::pad``'s eager device kernel (CPU fallback + copy) is used.
+    """
+    return torch.ops.spyre.pad(input, list(pad), float(value))

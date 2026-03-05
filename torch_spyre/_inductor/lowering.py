@@ -529,3 +529,41 @@ def lower_clamp(x, min=None, max=None):
     )
     pw.realize()
     return pw
+
+
+@register_spyre_lowering(torch.ops.spyre.pad)
+def lower_pad(x, pad, fill_value):
+    """Lower ``spyre::pad`` to a PAD_OP Pointwise.
+
+    The Pointwise has ``ranges = output_size`` (padded) while the inner_fn
+    loads from ``x`` (smaller input buffer).  When ``spyre_kernel.store()``
+    encounters a TensorAccess whose input buffer is strictly smaller than the
+    output buffer, it detects ``PAD_OP`` and ``generate_pad`` emits the
+    appropriate DSC with the input data placed at the beginning of the output.
+
+    **Known limitation (fill_value ≠ 0):** the backend zeroes the output
+    buffer before the PAD_OP copy, so the gap region will contain zeros
+    instead of ``fill_value``.  Non-zero fill is therefore only correct in
+    eager mode (the CPU fallback).  A TODO exists to pre-fill the output
+    buffer via a ``spyre::full`` DSC kernel in a follow-up.
+    """
+    x_size = [V.graph.sizevars.size_hint(s) for s in x.get_size()]
+    ndim = len(x_size)
+    out_size = list(x_size)
+    for i in range(min(len(pad) // 2, ndim)):
+        dim = ndim - 1 - i
+        out_size[dim] += pad[2 * i] + pad[2 * i + 1]
+
+    def inner_fn(index):
+        # Bare TensorAccess load: spyre_kernel.store() detects PAD_OP when
+        # it sees that the input buffer (x) is smaller than the output buffer.
+        return x.make_loader()(index)
+
+    pw = Pointwise.create(
+        device=x.get_device(),
+        dtype=x.get_dtype(),
+        inner_fn=inner_fn,
+        ranges=out_size,
+    )
+    pw.realize()
+    return pw

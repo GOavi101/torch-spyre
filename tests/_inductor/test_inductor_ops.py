@@ -646,6 +646,28 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             },
         },
         (
+            "test_logical_not",
+            "test_fallback_unary_op_cpu",
+        ): {
+            "ops_dict": {
+                "logical_not": torch.logical_not,
+            },
+            "param_sets": {
+                "1d_fp16": (cached_randn(128, dtype=torch.float16),),
+                "1d_bool": (cached_randn(128, dtype=torch.float16) > 0,),
+                "2d_fp16": (cached_randn((4, 128), dtype=torch.float16),),
+                "2d_bool": (cached_randn((4, 128), dtype=torch.float16) > 0,),
+                "3d_fp16": (cached_randn((2, 4, 128), dtype=torch.float16),),
+                "3d_bool": (cached_randn((2, 4, 128), dtype=torch.float16) > 0,),
+                "4d_fp16": (cached_randn((1, 2, 4, 128), dtype=torch.float16),),
+                "4d_bool": (cached_randn((1, 2, 4, 128), dtype=torch.float16) > 0,),
+                "fp16_single_elem": (cached_randn(1, dtype=torch.float16),),
+                "bool_single_elem": (cached_randn(1, dtype=torch.float16) > 0,),
+                # TODO: Fix torch.eq(-0.0,0.0) equality bug (Issue 628)
+                # "fp16_signed_0": (torch.tensor([0.0, -0.0, 1.0, -1.0], dtype=torch.float16),),
+            },
+        },
+        (
             "test_inplace_op",
             "test_inplace_op_cpu",
         ): {
@@ -834,6 +856,23 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "4d": (cached_randn((4, 17, 256, 128), dtype=torch.float16),),
             },
         },
+        ("test_pad_zero_fill", "test_pad_zero_fill_cpu"): {
+            "param_sets": {
+                # (input_shape, pad_tuple), all zero-fill (value=0.0)
+                "2d_last_dim_right": (
+                    cached_randn((3, 64), dtype=torch.float16),
+                    (0, 64),
+                ),
+                "2d_both_dims": (
+                    cached_randn((3, 64), dtype=torch.float16),
+                    (0, 64, 0, 2),
+                ),
+                "3d_last_dim_right": (
+                    cached_randn((2, 3, 64), dtype=torch.float16),
+                    (0, 64),
+                ),
+            },
+        },
     }
 
     def __init__(self, *args, **kwargs):
@@ -868,6 +907,10 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         torch.testing.assert_close(result, torch.eq(x, y))
 
     def test_unary_op_cpu(self, op, x):
+        compare_with_cpu(op, x)
+
+    @pytest.mark.filterwarnings("ignore::torch_spyre.fallbacks.FallbackWarning")
+    def test_fallback_unary_op_cpu(self, op, x):
         compare_with_cpu(op, x)
 
     def test_binary_op(self, op, a, b):
@@ -1012,6 +1055,14 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     def test_rmsnorm_cpu(self, x):
         def fn(input):
             return torch.nn.functional.rms_norm(input, [input.shape[-1]], eps=1e-6)
+
+        compare_with_cpu(fn, x)
+
+    def test_pad_zero_fill_cpu(self, x, pad):
+        """Compiled pad with zero fill value matches CPU result."""
+
+        def fn(x):
+            return torch.nn.functional.pad(x, pad, value=0.0)
 
         compare_with_cpu(fn, x)
 

@@ -233,3 +233,18 @@ def spyre__embedding(
     """
     # TODO: Remove this fallback once we enable gather/scatter ops on spyre
     return aten.embedding(weight, indices, padding_idx, scale_grad_by_freq, sparse)
+
+
+# NOTE: constant_pad_nd is registered as a DIRECT device kernel (not via
+# register_fallback) so that it is NOT added to fallback_ops.  Adding it to
+# fallback_ops would cause enable_spyre_decompositions to remove the Spyre
+# decomposition (constant_pad_nd → spyre::pad) in compiled mode, preventing
+# the PAD_OP DSC path from being used.  In eager mode this kernel runs
+# directly (CPU fallback); in compiled mode the Spyre decomposition takes over.
+@torch.library.register_kernel("aten::constant_pad_nd", ["spyre"])
+def spyre__constant_pad_nd_eager(input, pad, value=0):
+    warn_fallback("aten.constant_pad_nd")
+    result = torch.nn.functional.pad(
+        input.to(device="cpu"), pad, mode="constant", value=value
+    )
+    return result.to(input.device)
