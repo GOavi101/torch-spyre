@@ -344,11 +344,14 @@ def create_tensor_arg(
     is_input: bool, arg_index: int, tensor: TensorAccess, di: list[DimensionInfo]
 ) -> TensorArg:
     scales = analyze_tensor_access(di, tensor)
+    # Concretize any symbolic sizes (SymInt/SymPy) to plain ints so that
+    # TensorArg.__repr__ emits valid Python literals in the generated module.
+    concrete_size = [V.graph.sizevars.size_hint(s) for s in tensor.layout.size]
     return TensorArg(
         is_input,
         arg_index,
         tensor.layout.dtype,
-        tensor.layout.size,
+        concrete_size,
         scales,
         tensor.layout.allocation,
         tensor.layout.device_layout,
@@ -500,6 +503,18 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
                     # TODO(aviros): Make this a fully fledged STCDP op
                     op = TRANSPOSE_OP
                     generic_relayout = True
+                elif (
+                    (in_size := args[0].host_size)
+                    and (out_size := args[1].host_size)
+                    and (diff := len(out_size) - len(in_size)) >= 0
+                    and all(i == o or i == 1 for i, o in zip(in_size, out_size[diff:]))
+                ):
+                    # Broadcast: input has fewer/equal dims, each dim either matches or is 1
+                    op = CLONE_OP
+                    in_di = out_di
+                    args[0] = create_tensor_arg(
+                        True, actuals.index(value.name), value, in_di
+                    )
                 elif (
                     args[1].device_layout.device_size
                     == args[0].device_layout.device_size

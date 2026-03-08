@@ -61,7 +61,11 @@ def map_dims_to_vars(layout: FixedLayout, index: Expr) -> dict[int, Symbol]:
     """
     result = {}
     for sym in index.free_symbols:
-        stride_val = sympy_subs(index, {sym: 1}) - sympy_subs(index, {sym: 0})
+        # Use sympy.Integer (not Python int) so that custom SymPy functions like
+        # torch's Max/Min don't crash when reconstructing with concrete values.
+        stride_val = sympy_subs(index, {sym: sympy.Integer(1)}) - sympy_subs(
+            index, {sym: sympy.Integer(0)}
+        )
         if stride_val in layout.stride:
             idx = layout.stride.index(stride_val)
             result[idx] = sym
