@@ -560,9 +560,9 @@ def lower_pad(x, pad, fill_value):
     """Lower ``spyre::pad`` to a PAD_OP Pointwise (right-only, zero-fill).
 
     By the time this lowering is reached, ``constant_pad_nd_decomp`` has
-    already handled left-pad and non-zero fill cases by decomposing them
-    into ``aten.zeros``/``aten.full`` + ``aten.slice_scatter``.  So here
-    all left pads == 0 and fill_value == 0.0 is guaranteed.
+    already routed left-pad and non-zero fill cases to ``spyre::pad_general``
+    (which runs on CPU as an ExternKernel).  So here all left pads == 0
+    and fill_value == 0.0 is guaranteed.
 
     The Pointwise has ``ranges = output_size`` and its inner_fn loads from
     the smaller input buffer x.  ``spyre_kernel.store()`` detects PAD_OP

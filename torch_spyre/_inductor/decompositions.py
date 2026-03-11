@@ -373,39 +373,20 @@ def constant_pad_nd_decomp(
     """
     Decompose ``aten.constant_pad_nd`` for the compiled path.
 
-    Right-only, zero-fill: route to ``spyre::pad`` → PAD_OP.
+    Right-only, zero-fill: route to ``spyre::pad`` → PAD_OP Pointwise
+    (fast path, runs on Spyre hardware).
 
-    Left-pad or non-zero fill: implement with ``aten.zeros``/``aten.full``
-    + ``aten.slice_scatter`` per padded dimension.  We deliberately avoid
-    calling ``aten.constant_pad_nd`` or ``torch.nn.functional.pad`` here
-    because they re-enter this same decomposition during make_fx tracing
-    and cause infinite recursion.
+    Left-pad or non-zero fill: route to ``spyre::pad_general``.  That op
+    has no Inductor lowering, so ``torch.compile`` treats it as an
+    ExternKernel and calls its CPU fallback at runtime.  We deliberately
+    avoid ``aten.zeros`` + ``aten.slice_scatter`` here because Inductor
+    lowers ``slice_scatter`` to a Pointwise with logical ``and_`` (range
+    check), which the Spyre codegen cannot handle.
     """
     ndim = input.ndim
     has_left_pad = any(
         pad[2 * i] != 0 for i in range(min(len(pad) // 2, ndim))
     )
     if has_left_pad or value != 0.0:
-        # Build the padded output one dimension at a time (innermost first)
-        # using only primitive ops that don't loop back into this decomp.
-        current = input
-        for i in range(min(len(pad) // 2, ndim)):
-            left = pad[2 * i]
-            right = pad[2 * i + 1]
-            if left == 0 and right == 0:
-                continue
-            dim = ndim - 1 - i
-            new_size = list(current.shape)
-            new_size[dim] = new_size[dim] + left + right
-            if value == 0.0:
-                padded = torch.zeros(new_size, dtype=current.dtype, device=current.device)
-            else:
-                padded = torch.full(
-                    new_size, value, dtype=current.dtype, device=current.device
-                )
-            # Place current into padded at [left : left + current.shape[dim]] on dim.
-            current = torch.ops.aten.slice_scatter(
-                padded, current, dim, left, left + input.shape[ndim - 1 - i]
-            )
-        return current
+        return torch.ops.spyre.pad_general(input, list(pad), float(value))
     return torch.ops.spyre.pad(input, list(pad), float(value))

@@ -15,7 +15,6 @@
 from dataclasses import dataclass, field
 from typing import Any, Callable, Self, Sequence, Tuple, Union
 from abc import ABC
-from collections import Counter
 
 import torch
 import sympy
@@ -478,10 +477,16 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
             ]
             in_stl = args[0].device_layout  # type: ignore[union-attr]
             out_stl = args[1].device_layout  # type: ignore[union-attr]
+            # Actual host tensor sizes (used for PAD detection).
+            # DimensionInfo.numel reflects the iteration-space size (= output
+            # ranges in a Pointwise), so both in_di and out_di would report the
+            # same numel even for a pad op.  Use the layout sizes instead.
+            in_host_size = [int(s) for s in value.layout.size]
+            out_host_size = [int(s) for s in dst.layout.size]
             # Determine data op based on tensor args.
-            # PAD is checked before TRANSPOSE: a right-pad shares the same
-            # Counter(dim_map) + device_size-mismatch signature as TRANSPOSE,
-            # so PAD must be disambiguated first.
+            # PAD is checked before TRANSPOSE: a right-pad may share the same
+            # dim_map-mismatch signature as TRANSPOSE, so PAD must be
+            # disambiguated first via host sizes.
             if all(is_wildcard(d.var) for d in in_di) and not all(
                 is_wildcard(d.var) for d in out_di
             ):
@@ -490,29 +495,27 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
                 in_di = out_di
                 args[0] = self.create_tensor_arg(True, value.name, value, in_di)
             elif (
-                len(in_di) == len(out_di)
+                len(in_host_size) == len(out_host_size)
                 and all(
-                    out_di[i].numel >= in_di[i].numel
-                    for i in range(len(in_di))
+                    out_host_size[i] >= in_host_size[i]
+                    for i in range(len(in_host_size))
                 )
-                and [d.numel for d in in_di] != [d.numel for d in out_di]
+                and in_host_size != out_host_size
                 # device_size mismatch is implied (clone branch below
                 # catches equal device_size), but assert for safety.
                 and in_stl.device_size != out_stl.device_size
             ):
                 # Pad: output is element-wise >= input and strictly larger.
                 op = PAD_OP
-            elif in_stl.device_size == out_stl.device_size:
-                # Clone: check that device layout is the same.
-                op = CLONE_OP
-            elif (
-                Counter(in_stl.dim_map) == Counter(out_stl.dim_map)
-                and in_stl.device_size != out_stl.device_size
-            ) or (Counter(in_di) == Counter(out_di) and in_di != out_di):
-                # Transpose:
-                #   - check that the input / output DimensionInfo are the same, but in different order.
-                #   - check that the dim map has the same dimensions (no duplicate dimensions), but device size differs.
+            elif list(in_stl.dim_map) != list(out_stl.dim_map):
+                # Transpose: device layout dim_map differs between input and
+                # output (handles square, non-square, and same-host-size cases).
+                # Must be checked BEFORE the CLONE branch because for square
+                # transposes in_stl.device_size == out_stl.device_size.
                 op = TRANSPOSE_OP
+            elif in_stl.device_size == out_stl.device_size:
+                # Clone: same device layout.
+                op = CLONE_OP
             else:
                 # Unsupported data operation on TensorArg
                 raise Unsupported(f"Data operation {args[0]})=>{args[1]}")
@@ -521,18 +524,27 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
             di_for_spec = out_di if op == PAD_OP else in_di
             op_spec = create_op_spec(op, False, di_for_spec, args, op_info)
             if op == PAD_OP:
-                op_spec.op_info["input_dimensions"] = [d.numel for d in in_di]
+                op_spec.op_info["input_dimensions"] = in_host_size
             if op == TRANSPOSE_OP:
-                op_spec.op_info["transposed_dims"] = [
-                    d for d in range(len(in_di)) if in_di[d] != out_di[d]
+                # Derive transposed host dims from dim_map differences.
+                # Using dim_map (rather than in_di/out_di comparison) correctly
+                # handles square transposes where all iteration-space vars have
+                # equal ranges and in_di == out_di.
+                in_host_pos = {v: i for i, v in enumerate(in_stl.dim_map)}
+                out_host_pos = {v: i for i, v in enumerate(out_stl.dim_map)}
+                t_dims = [
+                    h
+                    for h in range(len(in_di))
+                    if in_host_pos.get(h) != out_host_pos.get(h)
                 ]
-                # Reorder it_dim_map of the input to implement transpositions
+                op_spec.op_info["transposed_dims"] = t_dims
+                # Reorder scale of the output to implement transpositions
                 (
-                    op_spec.args[0].it_dim_map[op_spec.op_info["transposed_dims"][0]],  # type: ignore[union-attr]
-                    op_spec.args[0].it_dim_map[op_spec.op_info["transposed_dims"][1]],  # type: ignore[union-attr]
+                    op_spec.args[-1].it_dim_map[t_dims[0]],  # type: ignore[union-attr]
+                    op_spec.args[-1].it_dim_map[t_dims[1]],  # type: ignore[union-attr]
                 ) = (
-                    op_spec.args[0].it_dim_map[op_spec.op_info["transposed_dims"][1]],  # type: ignore[union-attr]
-                    op_spec.args[0].it_dim_map[op_spec.op_info["transposed_dims"][0]],  # type: ignore[union-attr]
+                    op_spec.args[-1].it_dim_map[t_dims[1]],  # type: ignore[union-attr]
+                    op_spec.args[-1].it_dim_map[t_dims[0]],  # type: ignore[union-attr]
                 )
             self.op_specs.append(op_spec)
         else:

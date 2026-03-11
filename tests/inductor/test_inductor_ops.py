@@ -897,6 +897,29 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
             },
         },
+        ("test_pad_general", "test_pad_general_cpu"): {
+            "param_sets": {
+                # (input_tensor, pad_tuple, fill_value)
+                # Left-pad on last dim (uses spyre::pad_general ExternKernel → CPU)
+                "2d_left_pad": (
+                    cached_randn((3, 64), dtype=torch.float16),
+                    (2, 3),
+                    0.0,
+                ),
+                # Left-pad on both dims (exact repro of the reported crash)
+                "2d_left_right_both_dims": (
+                    cached_randn((64, 128), dtype=torch.float16),
+                    (2, 3, 1, 1),
+                    0.0,
+                ),
+                # Non-zero fill value
+                "2d_nonzero_fill": (
+                    cached_randn((3, 64), dtype=torch.float16),
+                    (0, 64),
+                    1.0,
+                ),
+            },
+        },
     }
 
     def __init__(self, *args, **kwargs):
@@ -1109,6 +1132,15 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
 
         def fn(x):
             return torch.nn.functional.pad(x, pad, value=0.0)
+
+        compare_with_cpu(fn, x)
+
+    @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
+    def test_pad_general_cpu(self, x, pad, fill_value):
+        """Left-pad and non-zero fill fall back to CPU via spyre::pad_general."""
+
+        def fn(x):
+            return torch.nn.functional.pad(x, pad, value=fill_value)
 
         compare_with_cpu(fn, x)
 

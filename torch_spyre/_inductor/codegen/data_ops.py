@@ -942,7 +942,22 @@ def generate_transpose_4d_stick(
     }
 
 
-def generate_identity(pointers, *, op, dimensions, inputs, outputs, **kwargs):
+def generate_identity(
+    pointers,
+    *,
+    op,
+    dimensions,
+    inputs,
+    outputs,
+    input_dim_infos=None,
+    **kwargs,
+):
+    """Emit an identity/clone data op.
+
+    When *input_dim_infos* is provided (pad case), input tensors are addressed
+    with those dimensions while output tensors use the standard dim_infos built
+    from *dimensions*.
+    """
     tensors = inputs + outputs
     input_dtype = inputs[0]["device_layout"].device_dtype
     data_format = input_dtype
@@ -970,6 +985,12 @@ def generate_identity(pointers, *, op, dimensions, inputs, outputs, **kwargs):
         padded_op_dimensions,
         dim_splits,
     )
+
+    def di_for(idx):
+        """Per-tensor DimInfos: inputs use input_dim_infos when provided (pad)."""
+        if input_dim_infos is not None and idx < len(inputs):
+            return input_dim_infos
+        return dim_infos
 
     layouts = create_tensor_specific_layouts(
         tensors, dim_infos, op, op_dims_tensor=op_dims_tensor
@@ -1049,11 +1070,13 @@ def generate_identity(pointers, *, op, dimensions, inputs, outputs, **kwargs):
                                 "component_": "hbm"
                                 if tensor["lx_addr"] is None
                                 else "lx",
-                                "layoutDimOrder_": dim_infos.get_tensor_op_layout_order(
+                                "layoutDimOrder_": di_for(i).get_tensor_op_layout_order(
                                     tensor, op
                                 ),
                                 "maxDimSizes_": [-1]
-                                * len(dim_infos.get_tensor_op_layout_order(tensor, op)),
+                                * len(
+                                    di_for(i).get_tensor_op_layout_order(tensor, op)
+                                ),
                                 "startAddressCoreCorelet_": {
                                     "dim_prop_func": [
                                         {"Map": {}},
@@ -1072,7 +1095,7 @@ def generate_identity(pointers, *, op, dimensions, inputs, outputs, **kwargs):
                                             # calculate the prod of dim sizes
                                             # less significant than chosen split dim i.e. the stick
                                             * math.prod(
-                                                dim_infos.get_padded_sizes()[:2]
+                                                di_for(i).get_padded_sizes()[:2]
                                             )
                                             * num_bytes(
                                                 tensor["device_layout"].device_dtype
@@ -1094,13 +1117,15 @@ def generate_identity(pointers, *, op, dimensions, inputs, outputs, **kwargs):
                                             elems_per_stick=tensor[
                                                 "device_layout"
                                             ].device_dtype.elems_per_stick(),
-                                            is_stick_dim=(di.label in op_stick_labels),
+                                            is_stick_dim=(
+                                                di.label in op_stick_labels
+                                            ),
                                             is_stick_reduction=(
                                                 di.label in op_stick_labels
                                                 and di.scale == -1
                                             ),
                                         )
-                                        for di in dim_infos.get_tensor_op_infos(
+                                        for di in di_for(i).get_tensor_op_infos(
                                             tensor, op
                                         )
                                     },
@@ -1125,7 +1150,7 @@ def generate_identity(pointers, *, op, dimensions, inputs, outputs, **kwargs):
                                         )
                                         else -2
                                     )
-                                    for di in dim_infos.get_tensor_op_infos(tensor, op)
+                                    for di in di_for(i).get_tensor_op_infos(tensor, op)
                                 ],
                                 "wordLength": num_bytes(
                                     tensor["device_layout"].device_dtype
@@ -1169,275 +1194,39 @@ def generate_identity(pointers, *, op, dimensions, inputs, outputs, **kwargs):
 
 
 def generate_pad(pointers, *, op, dimensions, inputs, outputs, **kwargs):
-    """Emit pad as identity-style op: copy input (small) to output (padded) buffer.
+    """Emit pad as an identity/clone op with different input/output buffer sizes.
 
-    dimensions are the output (padded) dimensions. Input dimensions are taken
-    from inputs[0]["host_size"]. The backend must interpret identity with
-    different input/output sizes as pad (copy input into center of output).
+    The input tensor is addressed using its original (smaller) dimensions;
+    the output uses the padded dimensions.  The backend interprets the size
+    mismatch as implicit zero-padding.
 
-    NOTE: This assumes the backend zeros the output buffer before executing
-    the identity copy, so that padded regions contain zeros.
+    Input dimensions come from kwargs["op_info"]["input_dimensions"],
+    stored by spyre_kernel.store().
     """
-    tensors = inputs + outputs
-    input_dtype = inputs[0]["device_layout"].device_dtype
-    data_format = input_dtype
-
+    input_dimensions = list(kwargs["op_info"]["input_dimensions"])
     ndim = len(dimensions)
-    input_dimensions = list(inputs[0]["host_size"])
     assert ndim == len(input_dimensions), "pad input and output must have same rank"
 
-    cores = 1
-
-    # Op space is the output (padded) tensor
     op_dims_tensor = outputs[0]
     dl_out = op_dims_tensor["device_layout"]
     dim_map = dl_out.dim_map[::-1][1:]
     dim_labels = INPUT_DIM_LABELS[: ndim - 1] + OUTPUT_DIM_LABELS[:1]
-    dim_splits = [1] * (ndim - 1) + [cores]
-
-    # Output (padded) dim_infos
-    padded_output_dimensions = [
-        get_device_size(host_dim, op_dims_tensor) for host_dim in range(ndim)
-    ]
-    dim_infos_output = DimInfos(
-        dim_map,
-        dim_labels,
-        dimensions,
-        padded_output_dimensions,
-        dim_splits,
-    )
-
-    # Input (small) dim_infos for per-tensor allocate/coordinates
     padded_input_dimensions = [
         get_device_size(host_dim, inputs[0]) for host_dim in range(ndim)
     ]
-    dim_infos_input = DimInfos(
-        dim_map,
-        dim_labels,
-        input_dimensions,
-        padded_input_dimensions,
-        dim_splits,
+    input_di = DimInfos(
+        dim_map, dim_labels, input_dimensions, padded_input_dimensions,
+        [1] * (ndim - 1) + [1],
     )
-
-    layouts = create_tensor_specific_layouts(
-        tensors, dim_infos_output, op, op_dims_tensor=op_dims_tensor
+    # The backend recognises input/output size mismatch in a "clone" op as
+    # implicit zero-padding, so rename the "identity" envelope key to "clone".
+    result = generate_identity(
+        pointers,
+        op=op,
+        dimensions=dimensions,
+        inputs=inputs,
+        outputs=outputs,
+        input_dim_infos=input_di,
+        **kwargs,
     )
-
-    op_stick_labels = dim_infos_output.get_tensor_stick_dim_labels(op_dims_tensor)
-    core_id_to_wk_slice = {}
-    for i in range(cores):
-        core_id_to_wk_slice[str(i)] = {
-            str(s): i if s in op_stick_labels else 0 for s in dim_labels
-        }
-
-    def dim_infos_for_tensor(tensor_index):
-        return dim_infos_input if tensor_index < len(inputs) else dim_infos_output
-
-    # The top-level key is "clone" intentionally: pad is implemented as a
-    # clone/identity op where input and output buffers have different sizes.
-    # The backend interprets the size mismatch as implicit padding.
-    return {
-        "clone": {
-            "sdscFoldProps_": [{"factor_": 1, "label_": "time"}],
-            "sdscFolds_": {
-                "dim_prop_func": [{"Affine": {"alpha_": 1, "beta_": 0}}],
-                "dim_prop_attr": [{"factor_": 1, "label_": "time"}],
-                "data_": {"[0]": "0"},
-            },
-            "coreFoldProp_": {"factor_": cores, "label_": "core"},
-            "coreletFoldProp_": {"factor_": 1, "label_": "corelet"},
-            "numCoresUsed_": cores,
-            "coreIdToDsc_": {str(c): 0 for c in range(cores)},
-            "numWkSlicesPerDim_": {
-                di.label: di.nsplits for di in dim_infos_output.get_op_infos()
-            },
-            "coreIdToWkSlice_": core_id_to_wk_slice,
-            "coreIdToDscSchedule": {str(c): [[-1, 0, 0, 0]] for c in range(cores)},
-            "dscs_": [
-                {
-                    op: {
-                        "numCoresUsed_": cores,
-                        "numCoreletsUsed_": 1,
-                        "coreIdsUsed_": [c for c in range(cores)],
-                        "N_": {
-                            "name_": "n",
-                            **{
-                                di.label + "_": di.padded_size
-                                for di in dim_infos_output.get_op_infos()
-                            },
-                        },
-                        "dataStageParam_": {
-                            "0": {
-                                "ss_": {
-                                    "name_": "core",
-                                    **{
-                                        di.label + "_": di.split_size
-                                        for di in dim_infos_output.get_op_infos()
-                                    },
-                                },
-                                "el_": {
-                                    "name_": "core",
-                                    **{
-                                        di.label + "_": di.split_size
-                                        for di in dim_infos_output.get_op_infos()
-                                    },
-                                },
-                            }
-                        },
-                        "primaryDsInfo_": {
-                            name: {
-                                "layoutDimOrder_": layout_info["layout_order"],
-                                "stickDimOrder_": layout_info["stick_dim_order"],
-                                "stickSize_": [data_format.elems_per_stick()],
-                            }
-                            for name, layout_info in layouts.items()
-                        },
-                        "scheduleTree_": [
-                            {
-                                "nodeType_": "allocate",
-                                "name_": f"allocate-Tensor{i}_{'hbm' if tensor['lx_addr'] is None else 'lx'}",
-                                "prev_": "",
-                                "ldsIdx_": i,
-                                "component_": "hbm"
-                                if tensor["lx_addr"] is None
-                                else "lx",
-                                "layoutDimOrder_": dim_infos_for_tensor(
-                                    i
-                                ).get_tensor_op_layout_order(tensor, op),
-                                "maxDimSizes_": [-1]
-                                * len(
-                                    dim_infos_for_tensor(
-                                        i
-                                    ).get_tensor_op_layout_order(tensor, op)
-                                ),
-                                "startAddressCoreCorelet_": {
-                                    "dim_prop_func": [
-                                        {"Map": {}},
-                                        {"Const": {}},
-                                        {"Const": {}},
-                                    ],
-                                    "dim_prop_attr": [
-                                        {"factor_": cores, "label_": "core"},
-                                        {"factor_": 1, "label_": "corelet"},
-                                        {"factor_": 1, "label_": "time"},
-                                    ],
-                                    "data_": {
-                                        f"[{c}, 0, 0]": str(
-                                            pointers[tensor["name"]]
-                                            + c
-                                            * math.prod(
-                                                dim_infos_for_tensor(
-                                                    i
-                                                ).get_padded_sizes()[:2]
-                                            )
-                                            * num_bytes(
-                                                tensor[
-                                                    "device_layout"
-                                                ].device_dtype
-                                            )
-                                            // cores
-                                        )
-                                        if tensor["lx_addr"] is None
-                                        else tensor["lx_addr"]
-                                        for c in range(cores)
-                                    },
-                                },
-                                "coordinates_": {
-                                    "coordInfo": {
-                                        di.label: gen_coord_info_value(
-                                            size=di.split_size
-                                            if (di.scale == 1)
-                                            else 1,
-                                            nsplits=di.nsplits,
-                                            elems_per_stick=tensor[
-                                                "device_layout"
-                                            ].device_dtype.elems_per_stick(),
-                                            is_stick_dim=(
-                                                di.label
-                                                in dim_infos_for_tensor(
-                                                    i
-                                                ).get_tensor_stick_dim_labels(
-                                                    tensor
-                                                )
-                                            ),
-                                            is_stick_reduction=(
-                                                di.label
-                                                in dim_infos_for_tensor(
-                                                    i
-                                                ).get_tensor_stick_dim_labels(
-                                                    tensor
-                                                )
-                                                and di.scale == -1
-                                            ),
-                                        )
-                                        for di in dim_infos_for_tensor(
-                                            i
-                                        ).get_tensor_op_infos(tensor, op)
-                                    },
-                                    "coreIdToWkSlice_": {},
-                                },
-                            }
-                            for i, tensor in enumerate(tensors)
-                        ],
-                        "labeledDs_": [
-                            {
-                                "ldsIdx_": i,
-                                "dsName_": f"Tensor{i}",
-                                "dsType_": tensor["ds_type"],
-                                "scale_": [
-                                    (
-                                        di.scale
-                                        if not (
-                                            di.label
-                                            in dim_infos_for_tensor(
-                                                i
-                                            ).get_tensor_stick_dim_labels(
-                                                tensor
-                                            )
-                                            and di.scale == -1
-                                        )
-                                        else -2
-                                    )
-                                    for di in dim_infos_for_tensor(
-                                        i
-                                    ).get_tensor_op_infos(tensor, op)
-                                ],
-                                "wordLength": num_bytes(
-                                    tensor["device_layout"].device_dtype
-                                ),
-                                "dataFormat_": tensor[
-                                    "device_layout"
-                                ].device_dtype.name,
-                                "memOrg_": {
-                                    "hbm": {"isPresent": 1},
-                                    "lx": {"isPresent": 1},
-                                }
-                                if tensor["lx_addr"] is None
-                                else {"lx": {"isPresent": 1}},
-                            }
-                            for i, tensor in enumerate(tensors)
-                        ],
-                        "constantInfo_": {},
-                        "computeOp_": [
-                            {
-                                "opFuncName": "identity",
-                                "exUnit": "sfp",
-                                "attributes_": {
-                                    "dataFormat_": data_format.name,
-                                    "fidelity_": "regular",
-                                },
-                                "location": "Inner",
-                                "inputLabeledDs": [
-                                    f"Tensor{i}-idx{i}" for i in range(len(inputs))
-                                ],
-                                "outputLabeledDs": [
-                                    f"Tensor{i}-idx{i}"
-                                    for i in range(len(inputs), len(tensors))
-                                ],
-                            }
-                        ],
-                    }
-                }
-            ],
-        }
-    }
+    return {"clone": result["identity"]}

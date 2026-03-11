@@ -86,6 +86,14 @@ def spyre__addmm_out(
     return torch.ops.aten.add.out(mm_result, self, alpha=alpha, out=out)
 
 
+@torch.library.register_kernel("aten::constant_pad_nd", ["spyre"])  # type:ignore
+def spyre__constant_pad_nd(
+    input: torch.Tensor, pad: list[int], value: float = 0.0
+) -> torch.Tensor:
+    compiled_pad = torch.compile(torch.ops.aten.constant_pad_nd, dynamic=False)
+    return compiled_pad(input, pad, value)
+
+
 @torch.library.register_kernel("aten::fill_.Scalar", ["spyre"])  # type:ignore
 def spyre__fill_scalar(
     self: torch.Tensor, other: int | float | bool | complex

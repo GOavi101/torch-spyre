@@ -280,3 +280,35 @@ def _(input: torch.Tensor, pad: list[int], fill_value: float):
         dim = ndim - 1 - i
         out_size[dim] += pad[2 * i] + pad[2 * i + 1]
     return input.new_empty(out_size)
+
+
+@torch.library.custom_op("spyre::pad_general", mutates_args=(), device_types="spyre")
+def spyre_pad_general(
+    input: torch.Tensor,
+    pad: list[int],
+    fill_value: float,
+) -> torch.Tensor:
+    """General constant-value pad for left-pad or non-zero fill on Spyre.
+
+    This op is intentionally not registered with an Inductor lowering so that
+    ``torch.compile`` treats it as an ExternKernel and calls this CPU fallback
+    at runtime.  It handles all cases that ``spyre::pad`` (right-only, zero-fill
+    fast-path) cannot:
+      - left padding on any dimension
+      - non-zero fill values
+    """
+    warn_fallback("torch.ops.spyre.pad_general")
+    result = torch.nn.functional.pad(
+        input.cpu(), tuple(pad), mode="constant", value=fill_value
+    )
+    return result.to(input.device)
+
+
+@spyre_pad_general.register_fake
+def _(input: torch.Tensor, pad: list[int], fill_value: float):
+    ndim = input.ndim
+    out_size = list(input.shape)
+    for i in range(min(len(pad) // 2, ndim)):
+        dim = ndim - 1 - i
+        out_size[dim] += pad[2 * i] + pad[2 * i + 1]
+    return input.new_empty(out_size)
