@@ -880,6 +880,23 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "4d": (cached_randn((4, 17, 256, 128), dtype=torch.float16),),
             },
         },
+        ("test_pad_zero_fill", "test_pad_zero_fill_cpu"): {
+            "param_sets": {
+                # (input_tensor, pad_tuple), all zero-fill (value=0.0)
+                "2d_last_dim_right": (
+                    cached_randn((3, 64), dtype=torch.float16),
+                    (0, 64),
+                ),
+                "2d_both_dims": (
+                    cached_randn((3, 64), dtype=torch.float16),
+                    (0, 64, 0, 2),
+                ),
+                "3d_last_dim_right": (
+                    cached_randn((2, 3, 64), dtype=torch.float16),
+                    (0, 64),
+                ),
+            },
+        },
     }
 
     def __init__(self, *args, **kwargs):
@@ -1084,6 +1101,14 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     def test_rmsnorm_cpu(self, x):
         def fn(input):
             return torch.nn.functional.rms_norm(input, [input.shape[-1]], eps=1e-6)
+
+        compare_with_cpu(fn, x)
+
+    def test_pad_zero_fill_cpu(self, x, pad):
+        """Compiled pad with zero fill value matches CPU result."""
+
+        def fn(x):
+            return torch.nn.functional.pad(x, pad, value=0.0)
 
         compare_with_cpu(fn, x)
 

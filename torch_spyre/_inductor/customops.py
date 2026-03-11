@@ -248,3 +248,35 @@ def _ones_scalar_fake(
     dtype: Optional[torch.dtype] = None,
 ):
     return torch.empty(1, dtype=dtype, device="spyre")
+
+
+@torch.library.custom_op("spyre::pad", mutates_args=(), device_types="spyre")
+def spyre_pad(
+    input: torch.Tensor,
+    pad: list[int],
+    fill_value: float,
+) -> torch.Tensor:
+    """Constant-value pad on Spyre.
+
+    ``pad`` follows PyTorch convention: elements are ordered from the last
+    dimension to the first, in (left, right) pairs.  E.g. for a 2-D input,
+    ``pad = (left_W, right_W, left_H, right_H)``.
+
+    Falls back to CPU for eager execution and for non-zero fill values in
+    compiled mode.
+    """
+    warn_fallback("torch.ops.spyre.pad")
+    result = torch.nn.functional.pad(
+        input.cpu(), tuple(pad), mode="constant", value=fill_value
+    )
+    return result.to(input.device)
+
+
+@spyre_pad.register_fake
+def _(input: torch.Tensor, pad: list[int], fill_value: float):
+    ndim = input.ndim
+    out_size = list(input.shape)
+    for i in range(min(len(pad) // 2, ndim)):
+        dim = ndim - 1 - i
+        out_size[dim] += pad[2 * i] + pad[2 * i + 1]
+    return input.new_empty(out_size)

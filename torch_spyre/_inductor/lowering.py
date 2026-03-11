@@ -553,3 +553,36 @@ def clone(x, *, memory_format=None):
         result.realize()
         result.freeze_layout_with_stride_order(stride_order)
     return result
+
+
+@register_spyre_lowering(torch.ops.spyre.pad)
+def lower_pad(x, pad, fill_value):
+    """Lower ``spyre::pad`` to a PAD_OP Pointwise (right-only, zero-fill).
+
+    By the time this lowering is reached, ``constant_pad_nd_decomp`` has
+    already handled left-pad and non-zero fill cases by decomposing them
+    into ``aten.zeros``/``aten.full`` + ``aten.slice_scatter``.  So here
+    all left pads == 0 and fill_value == 0.0 is guaranteed.
+
+    The Pointwise has ``ranges = output_size`` and its inner_fn loads from
+    the smaller input buffer x.  ``spyre_kernel.store()`` detects PAD_OP
+    from the size mismatch between x and the output.
+    """
+    ndim = len(x.get_size())
+    x_size = [V.graph.sizevars.size_hint(s) for s in x.get_size()]
+    out_size = list(x_size)
+    for i in range(min(len(pad) // 2, ndim)):
+        dim = ndim - 1 - i
+        out_size[dim] += pad[2 * i] + pad[2 * i + 1]
+
+    def inner_fn(index):
+        return x.make_loader()(index)
+
+    pw = Pointwise.create(
+        device=x.get_device(),
+        dtype=x.get_dtype(),
+        inner_fn=inner_fn,
+        ranges=out_size,
+    )
+    pw.realize()
+    return pw
