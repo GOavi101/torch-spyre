@@ -1834,6 +1834,24 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
 
         compare_with_cpu(fn, x)
 
+    def test_pad_unsupported(self):
+        """Padding cases that raise Unsupported and cannot compile on Spyre."""
+        from torch_spyre._inductor.errors import Unsupported
+
+        unsupported_cases = [
+            # Negative padding (cropping).
+            (cached_randn((3, 64), dtype=torch.float16), (0, -32)),
+            (cached_randn((4, 64), dtype=torch.float16), (0, 0, 0, -2)),
+            # Sub-stick last dim: gap not a multiple of inner repeats.
+            (cached_randn((3, 1), dtype=torch.float16), (0, 63)),
+            (cached_randn((3, 2), dtype=torch.float16), (0, 126)),
+        ]
+        from torch_spyre._inductor.decompositions import pad_decomp
+
+        for x, pad in unsupported_cases:
+            with pytest.raises(Unsupported):
+                pad_decomp(x, list(pad))
+
     @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
     def test_full_cpu(self, *args):
         def fn(device=None):
