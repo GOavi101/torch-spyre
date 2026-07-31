@@ -61,6 +61,8 @@ inline std::string elementArrangementToString(ElementArrangement ea) {
       return "DL16_TO_FP32";
     case ElementArrangement::QFP8CH:
       return "QFP8CH";
+    case ElementArrangement::QFP8WT:
+      return "QFP8WT";
     case ElementArrangement::EXX2:
       return "EXX2";
     case ElementArrangement::FP32_TO_DL16:
