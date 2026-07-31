@@ -2522,7 +2522,9 @@ class TestGenerateSdscTiledSymbols(unittest.TestCase):
             work_slices={d0: 1},
             core_id_to_work_slice={d0: Integer(0)},
             padding={},
-            layouts={"A": {"dim_order": [d0], "stick_dim_order": d0, "stick_size": 64}},
+            layouts={
+                "A": {"dim_order": [d0], "stick_dim_order": [d0], "stick_size": [64]}
+            },
             args=[tensor],
             constants={},
             coordinate_masking={},
@@ -2584,7 +2586,9 @@ class TestGenerateSdscTiledSymbols(unittest.TestCase):
             work_slices={d0: 1},
             core_id_to_work_slice={d0: Integer(0)},
             padding={},
-            layouts={"A": {"dim_order": [d0], "stick_dim_order": d0, "stick_size": 64}},
+            layouts={
+                "A": {"dim_order": [d0], "stick_dim_order": [d0], "stick_size": [64]}
+            },
             args=[tensor],
             constants={},
             coordinate_masking={},
@@ -2919,7 +2923,9 @@ class TestCompileOpSpecSymbolMapping(unittest.TestCase):
             work_slices={mb: 8},
             core_id_to_work_slice={mb: Integer(0)},
             padding={},
-            layouts={"A": {"dim_order": [mb], "stick_dim_order": mb, "stick_size": 64}},
+            layouts={
+                "A": {"dim_order": [mb], "stick_dim_order": [mb], "stick_size": [64]}
+            },
             args=[tensor],
             constants={},
             coordinate_masking={},
@@ -2986,7 +2992,9 @@ class TestCompileOpSpecSymbolMapping(unittest.TestCase):
             work_slices={mb: 8},
             core_id_to_work_slice={mb: Integer(0)},
             padding={},
-            layouts={"A": {"dim_order": [mb], "stick_dim_order": mb, "stick_size": 64}},
+            layouts={
+                "A": {"dim_order": [mb], "stick_dim_order": [mb], "stick_size": [64]}
+            },
             args=[tensor],
             constants={},
             coordinate_masking={},
@@ -3051,7 +3059,11 @@ class TestCompileOpSpecSymbolMapping(unittest.TestCase):
             core_id_to_work_slice={mb: Integer(0), kj: Integer(0)},
             padding={},
             layouts={
-                "A": {"dim_order": [mb, kj], "stick_dim_order": kj, "stick_size": 64}
+                "A": {
+                    "dim_order": [mb, kj],
+                    "stick_dim_order": [kj],
+                    "stick_size": [64],
+                }
             },
             args=[tensor],
             constants={},
