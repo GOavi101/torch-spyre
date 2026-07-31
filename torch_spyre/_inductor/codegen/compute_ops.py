@@ -1075,7 +1075,7 @@ def generate_sdsc(
                 if is_tiled
                 else 1
             )
-            is_fp8, other_sz, st_idx = _compute_fp8_coord_params(tensor, dim, sdsc_spec)
+            is_fp8, _, st_idx = _compute_fp8_coord_params(tensor, dim, sdsc_spec)
             result[dim_str] = gen_coord_info_value(
                 size=size,
                 nsplits=nsplits,
@@ -1083,7 +1083,6 @@ def generate_sdsc(
                 is_stick_dim=(dim in stick_dim_order),
                 is_stick_reduction=(scale == -2),
                 is_fp8_stick=is_fp8,
-                other_stick_size=other_sz,
                 stick_idx=st_idx,
                 tensor_idx=tensor_idx,
                 opfunc=sdsc_spec.opfunc,
