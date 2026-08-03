@@ -141,6 +141,9 @@ class ElementArrangement:
         ElementArrangement
     ]  # value = <ElementArrangement.QFP8CH: 2>
     EXX2: typing.ClassVar[ElementArrangement]  # value = <ElementArrangement.EXX2: 3>
+    FP32_TO_DL16: typing.ClassVar[
+        ElementArrangement
+    ]  # value = <ElementArrangement.FP32_TO_DL16: 4>
     QFP8WT: typing.ClassVar[
         ElementArrangement
     ]  # value = <ElementArrangement.QFP8WT: 5>
