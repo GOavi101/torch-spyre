@@ -330,7 +330,6 @@ def _ensure_synthetic_origin(result, target, args: tuple) -> None:
     buf.origins = OrderedSet([fx_node])
 
 
-# TODO:This is just place holder now; Real implementation will follow
 @register_spyre_lowering(torch.ops.aten._scaled_mm.default)
 def lower_scaled_mm(
     mat1,
