@@ -341,11 +341,6 @@ def lower_scaled_mm(
     out_dtype=None,
     use_fast_accum=False,
 ):
-    if scale_result is not None:
-        raise Unsupported("scale_result parameter in _scaled_mm is not yet supported")
-    if use_fast_accum:
-        raise Unsupported("use_fast_accum parameter in _scaled_mm is not yet supported")
-
     mat1.realize()
     mat2.realize()
     mat1_loader = mat1.make_loader()
@@ -429,6 +424,11 @@ def lower_scaled_mm(
         bias.realize()
         result = lowering.add(result, bias)
         result.realize()
+
+    if scale_result is not None:
+        logger.warning("scale_result parameter in _scaled_mm is not yet supported")
+    if use_fast_accum:
+        logger.warning("use_fast_accum parameter in _scaled_mm is not yet supported")
 
     if logger.isEnabledFor(logging.DEBUG):
         result_buf = V.graph.get_buffer(result.get_name())

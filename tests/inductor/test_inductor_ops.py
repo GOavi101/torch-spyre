@@ -19,6 +19,7 @@ import torch
 import torch.nn.functional as F
 
 
+
 from utils_inductor import (
     ParameterizedTestMeta,
     _compile_and_run,
@@ -396,10 +397,16 @@ _SCALED_MM_SHAPES = [
     (4, 4096, 4096),
 ]
 
-# scale_a, scale_b, bias
+# scale_a, scale_b, bias — include non-unit scales/bias from PR #2638
 _SCALED_MM_PARAMS = [
-    (1.0, 1.0, 0.0),
+    (1.0, 1.0, 0.0),  # unit scales, no bias — baseline
+    (2.0, 1.0, 0.0),  # non-unit scale_a
+    (1.0, 3.0, 0.0),  # non-unit scale_b
+    (2.0, 3.0, 0.0),  # both non-unit scales
+    (1.0, 1.0, 5.0),  # unit scales with bias
+    (2.0, 3.0, 0.5),  # non-unit scales with bias
 ]
+
 
 SCALED_MM_TESTS = {
     f"{shapes2key([shape])}_{sa}_{sb}_{b}": (
@@ -6753,19 +6760,9 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             )
 
         def pytorch_fn(a, b, scale_a, scale_b, bias=None):
-            q_a = (
-                (a / scale_a)
-                .clamp(-448.0, 448.0)
-                .to(torch.float8_e4m3fn)
-                .to(torch.float16)
-            )
-            q_b = (
-                (b / scale_b)
-                .clamp(-448.0, 448.0)
-                .to(torch.float8_e4m3fn)
-                .to(torch.float16)
-            )
-            return (q_a @ q_b) * (scale_a * scale_b) + bias
+            q_a = (a / scale_a).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+            q_b = (b / scale_b).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+            return (q_a @ q_b).to(torch.float16) * (scale_a * scale_b) + bias
 
         compare_with_pytorch(
             spyre_fn, pytorch_fn, a, b, scale_a, scale_b, bias, atol=0.1, rtol=0.1
